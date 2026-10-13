@@ -1974,7 +1974,16 @@ def _messages_to_responses_input(messages: list[dict]) -> tuple[str, list[dict]]
             continue
         if role not in ("user", "assistant", "developer"):
             role = "user"
+
+        # Responses API requires assistant history text to be output_text.
+        if role == "assistant":
+            content = [
+                {**part, "type": "output_text"}
+                if part.get("type") == "input_text" else part
+                for part in content
+            ]
         input_items.append({"role": role, "content": content})
+
     return instructions, input_items
 
 
