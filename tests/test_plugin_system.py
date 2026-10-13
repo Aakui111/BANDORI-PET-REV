@@ -3,25 +3,30 @@ import os
 import struct
 import tempfile
 import unittest
+import uuid
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QLabel
 
 from plugin_system.installer import PluginInstaller
 from plugin_system.models import PluginError, PluginManifest
 from plugin_system.paths import PluginStateStore, plugin_paths
-from plugin_system.protocol import FrameDecoder, RpcRemoteError, encode_message, request_message
+from plugin_system.protocol import FrameDecoder, RpcPeer, RpcRemoteError, encode_message, request_message
 from plugin_system.registry import ContributionRegistry, PluginEventBus, PluginServiceRegistry
 from plugin_system.scanner import scan_plugin_directory, sha256_directory
 from plugin_system.redaction import redact_secrets, restore_secrets
 from plugin_system.signing import build_signed_files_document
 from plugin_system.bridge import PluginComponentBridge
 from plugin_system.native import NativePluginLoader
-from plugin_system.supervisor import PluginSupervisor
+from plugin_system.supervisor import LocalPluginTransport, MAX_STORAGE_BYTES, PluginSupervisor
+from plugin_system.sdk import PluginContext
 from plugin_system.worker_runtime import ManagedPluginRuntime
 from local_tools import chat_completion_tools, run_local_tool_call
 
@@ -88,6 +93,195 @@ class PluginSystemTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_storage_initialization_and_normal_operations(self):
+        for initial in (None, b"{}", b"\xef\xbb\xbf{}"):
+            with self.subTest(initial=initial), tempfile.TemporaryDirectory() as directory:
+                supervisor = PluginSupervisor(paths=plugin_paths(Path(directory) / "home"))
+                try:
+                    path = supervisor._storage_path("com.example.test")
+                    if initial is not None:
+                        path.parent.mkdir(parents=True)
+                        path.write_bytes(initial)
+                    storage = PluginContext("com.example.test", LocalPluginTransport(
+                        supervisor, "com.example.test"
+                    )).storage
+                    self.assertEqual("fallback", storage.get("missing", "fallback"))
+                    self.assertEqual([], storage.keys())
+                    if initial is None:
+                        self.assertFalse(path.exists())
+                    storage.set("key", {"value": 42})
+                    self.assertEqual({"value": 42}, storage.get("key"))
+                    self.assertEqual(["key"], storage.keys())
+                    storage.delete("key")
+                    storage.delete("missing")
+                    self.assertEqual({}, json.loads(path.read_bytes()))
+                finally:
+                    supervisor.close()
+
+    def test_storage_corruption_rejects_all_operations_without_changing_bytes(self):
+        for original in (b'', b'{"secret":', b'\xff', b'[]', b'"secret"', b'42', b'null', b'true'):
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as directory:
+                supervisor = PluginSupervisor(paths=plugin_paths(Path(directory) / "home"))
+                try:
+                    path = supervisor._storage_path("com.example.test")
+                    path.parent.mkdir(parents=True)
+                    path.write_bytes(original)
+                    storage = PluginContext("com.example.test", LocalPluginTransport(
+                        supervisor, "com.example.test"
+                    )).storage
+                    for operation in (lambda: storage.get("key", "fallback"),
+                                      lambda: storage.set("key", 1),
+                                      lambda: storage.delete("key"), storage.keys):
+                        with self.subTest(operation=operation), self.assertRaises(RpcRemoteError) as caught:
+                            operation()
+                        self.assertEqual("storage_corrupt", caught.exception.code)
+                        self.assertNotIn("secret", str(caught.exception))
+                        self.assertEqual(original, path.read_bytes())
+                    self.assertEqual([path], list(path.parent.iterdir()))
+                finally:
+                    supervisor.close()
+
+    def test_storage_read_errors_do_not_initialize_or_overwrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PluginSupervisor(paths=plugin_paths(Path(directory) / "home"))
+            try:
+                path = supervisor._storage_path("com.example.test")
+                path.parent.mkdir(parents=True)
+                original = b'{"key": "old"}'
+                path.write_bytes(original)
+                for failure in (PermissionError(13, "denied"), OSError(5, "I/O failure")):
+                    for method in ("get", "set", "delete", "keys"):
+                        with self.subTest(failure=failure, method=method):
+                            with patch.object(Path, "read_text", side_effect=failure):
+                                with self.assertRaises(RpcRemoteError) as caught:
+                                    supervisor._storage_call("com.example.test", "storage." + method,
+                                                             {"key": "key", "value": 1})
+                            self.assertEqual("storage_read_error", caught.exception.code)
+                            self.assertEqual(failure.errno, caught.exception.data["errno"])
+                            self.assertEqual(original, path.read_bytes())
+                path.unlink()
+                path.mkdir()
+                with self.assertRaises(RpcRemoteError) as caught:
+                    supervisor._storage_call("com.example.test", "storage.keys", {})
+                self.assertEqual("storage_read_error", caught.exception.code)
+                self.assertTrue(path.is_dir())
+            finally:
+                supervisor.close()
+
+    def test_storage_write_limit_and_atomic_write_failures_preserve_original(self):
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = PluginSupervisor(paths=plugin_paths(Path(directory) / "home"))
+            try:
+                path = supervisor._storage_path("com.example.test")
+                path.parent.mkdir(parents=True)
+                original = b'{"key": "old"}'
+                path.write_bytes(original)
+                with self.assertRaises(RpcRemoteError) as caught:
+                    supervisor._storage_call("com.example.test", "storage.set",
+                                             {"key": "key", "value": "x" * MAX_STORAGE_BYTES})
+                self.assertEqual("storage_limit", caught.exception.code)
+                self.assertEqual(original, path.read_bytes())
+                for target in ("pathlib.Path.write_bytes", "plugin_system.supervisor.os.replace"):
+                    with self.subTest(target=target), patch(target, side_effect=OSError("write failed")):
+                        with self.assertRaises(OSError):
+                            supervisor._storage_call("com.example.test", "storage.set",
+                                                     {"key": "key", "value": "new"})
+                    self.assertEqual(original, path.read_bytes())
+                    self.assertEqual([path], list(path.parent.iterdir()))
+                overhead = len(json.dumps({"key": ""}, ensure_ascii=False, indent=2).encode("utf-8"))
+                supervisor._storage_call("com.example.test", "storage.set",
+                                         {"key": "key", "value": "x" * (MAX_STORAGE_BYTES - overhead)})
+                self.assertEqual(MAX_STORAGE_BYTES, len(path.read_bytes()))
+            finally:
+                supervisor.close()
+
+    def test_uninstall_preserves_corrupt_storage_by_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            supervisor = PluginSupervisor(paths=plugin_paths(root / "home"))
+            try:
+                write_plugin(root / "plugin", manifest())
+                supervisor.installer.commit(supervisor.installer.stage_local(root / "plugin"), enable=False)
+                path = supervisor._storage_path("com.example.test")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"corrupt")
+                supervisor.installer.uninstall("com.example.test")
+                self.assertEqual(b"corrupt", path.read_bytes())
+            finally:
+                supervisor.close()
+
+    def test_storage_errors_cross_rpc_and_managed_python_and_lua_sdk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            supervisor = PluginSupervisor(paths=plugin_paths(root / "home"))
+            server = QLocalServer()
+            client = QLocalSocket()
+            host_socket = None
+            try:
+                self.assertTrue(server.listen("storage-test-" + uuid.uuid4().hex))
+                client.connectToServer(server.serverName())
+                self.assertTrue(client.waitForConnected(1000))
+                self.assertTrue(server.waitForNewConnection(1000))
+                host_socket = server.nextPendingConnection()
+                host = RpcPeer(host_socket)
+                remote = RpcPeer(client)
+                supervisor._sessions[host] = {
+                    "authenticated": True, "role": "plugin", "identity": "com.example.test",
+                }
+                for method in ("get", "set", "delete", "keys"):
+                    name = "storage." + method
+                    host.register_handler(name, lambda params, name=name:
+                                          supervisor._peer_plugin_call(host, name, params))
+                path = supervisor._storage_path("com.example.test")
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b'{"secret":')
+                storage = PluginContext("com.example.test", remote).storage
+                operations = (lambda: storage.get("key", "fallback"),
+                              lambda: storage.set("key", 1),
+                              lambda: storage.delete("key"), storage.keys)
+                for code in ("storage_corrupt", "storage_read_error"):
+                    for operation in operations:
+                        with self.subTest(code=code, operation=operation):
+                            failure = PermissionError(13, "denied")
+                            read_failure = (patch.object(Path, "read_text", side_effect=failure)
+                                            if code == "storage_read_error" else nullcontext())
+                            with read_failure:
+                                with self.assertRaises(RpcRemoteError) as caught:
+                                    operation()
+                            self.assertEqual(code, caught.exception.code)
+                            self.assertNotIn("secret", str(caught.exception))
+                            if code == "storage_read_error":
+                                self.assertEqual({"errno": 13}, caught.exception.data)
+                for language in ("python", "lua"):
+                    with self.subTest(language=language):
+                        entry = "main.py" if language == "python" else "main.lua"
+                        value = manifest(language=language, entrypoints={"worker": entry})
+                        source = ('def activate(ctx):\n    ctx.storage.get("key", "fallback")\n'
+                                  if language == "python" else
+                                  'return {activate=function(ctx) '
+                                  'local ok, err = pcall(ctx.storage.get, "key", "fallback"); '
+                                  'assert(not ok); '
+                                  'assert(tostring(err) == "Plugin storage is not a valid JSON object") end}')
+                        write_plugin(root / language, value, source)
+                        runtime = ManagedPluginRuntime(root / language, PluginManifest.from_dict(value),
+                                                       remote, install_audit_hook=False)
+                        try:
+                            if language == "lua":
+                                runtime.activate()
+                            else:
+                                with self.assertRaises(RpcRemoteError) as caught:
+                                    runtime.activate()
+                                self.assertEqual("storage_corrupt", caught.exception.code)
+                        finally:
+                            runtime.deactivate("test")
+                self.assertEqual(b'{"secret":', path.read_bytes())
+            finally:
+                client.abort()
+                if host_socket is not None:
+                    host_socket.abort()
+                server.close()
+                supervisor.close()
 
     def test_manifest_rejects_native_lua(self):
         raw = manifest(language="lua", execution="native", entrypoints={"pet": "main.lua"})

@@ -144,8 +144,15 @@ Permissions default to denied. Common declarations are:
 }
 ```
 
-Private JSON storage needs no permission and is limited to 1 MiB. Network traffic is
-restricted to public HTTP(S), revalidates DNS and every redirect, strips credentials on
+Private JSON storage needs no permission and is limited to 1 MiB. A missing file
+initializes as an empty object. All storage operations fail with `storage_corrupt`
+for invalid JSON, invalid UTF-8, or a non-object JSON root, and with
+`storage_read_error` for read I/O failures (`data.errno` retains the OS error number).
+These errors propagate through the SDK and RPC; `get()` defaults never hide
+failed reads. Existing bytes are preserved without automatic
+repair or reset. Error messages do not include storage contents.
+
+Network traffic is restricted to public HTTP(S), revalidates DNS and every redirect, strips credentials on
 cross-origin redirects, and has a 16 MiB response limit. Responses above 1 MiB use a
 ten-minute authorized temporary reference with 512 KiB chunk reads. Text filesystem
 operations have a 2 MiB limit. Native manifests are

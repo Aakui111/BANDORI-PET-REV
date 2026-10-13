@@ -633,13 +633,19 @@ class PluginSupervisor(QObject):
 
     def _read_storage(self, plugin_id: str) -> dict[str, Any]:
         path = self._storage_path(plugin_id)
-        if not path.is_file():
-            return {}
         try:
             value = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        except FileNotFoundError:
             return {}
-        return value if isinstance(value, dict) else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise RpcRemoteError("storage_corrupt", "Plugin storage is not a valid JSON object") from None
+        except OSError as exc:
+            raise RpcRemoteError(
+                "storage_read_error", "Plugin storage could not be read", {"errno": exc.errno}
+            ) from None
+        if not isinstance(value, dict):
+            raise RpcRemoteError("storage_corrupt", "Plugin storage is not a valid JSON object")
+        return value
 
     def _write_storage(self, plugin_id: str, value: dict[str, Any]) -> None:
         payload = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
