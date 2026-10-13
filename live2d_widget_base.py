@@ -209,7 +209,7 @@ class Live2DWidgetBase(QOpenGLWidget):
 
     def _sync_renderer_target_size(self, *, force: bool = False):
         model = self._model
-        if not model or self._render_pipeline is DIRECT_RENDER_PIPELINE:
+        if not model:
             self._renderer_target_size = None
             return
         scale = self._render_ssaa_scale()

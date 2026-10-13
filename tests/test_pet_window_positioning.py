@@ -7,6 +7,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QRect
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QApplication, QWidget
 
 from model_manager import MODEL_FORMAT_MOC3
@@ -152,6 +153,87 @@ class FakeConfig:
 
     def set_model_action_profile(self, _character, _costume, _profile):
         pass
+
+
+class SavedPositionHarness(QWidget):
+    _constrain_position_to_screen = PetWindow._constrain_position_to_screen
+    _position_from_placement = PetWindow._position_from_placement
+    _screen_for_position = PetWindow._screen_for_position
+    _position_intersects_any_screen = PetWindow._position_intersects_any_screen
+    _is_position_on_screen = PetWindow._is_position_on_screen
+    _saved_position = PetWindow._saved_position
+    _try_restore_startup_position = PetWindow._try_restore_startup_position
+
+    def __init__(self, screen, placement=None, *, mode="live2d", x=-1, y=-1):
+        super().__init__()
+        self.screens = [screen]
+        self.placement_screen = screen
+        self._cfg = FakeConfig({})
+        prefix = "pixel_window" if mode == "pixel" else "window"
+        self.entry = {
+            f"{prefix}_placement": placement or {},
+            f"{prefix}_x": x,
+            f"{prefix}_y": y,
+        }
+        self._startup_position_restore_mode = mode
+        self._startup_position_restore_offset_x = 0
+        self._restoring_saved_position = False
+        self._startup_position_restore_pending = True
+        self._startup_transient_position_set = True
+
+    def _all_screens(self):
+        return self.screens
+
+    def _screen_for_placement(self, _placement):
+        return self.placement_screen
+
+    def _fallback_position_screen(self):
+        return self.screens[0]
+
+    def _current_model_entry(self):
+        return self.entry
+
+    def _surface_move(self, x, y):
+        self.move(x, y)
+
+    def _surface_position(self):
+        return self.pos()
+
+
+class StartupShowHarness(PetWindow):
+    # Keep the real showEvent and its screen checks; omit unrelated services.
+    moveEvent = QWidget.moveEvent
+    resizeEvent = QWidget.resizeEvent
+    hideEvent = QWidget.hideEvent
+    closeEvent = QWidget.closeEvent
+
+    def __init__(self, screen):
+        QWidget.__init__(self)
+        self._all_screens = lambda: [screen]
+        self._surface_position = self.pos
+        self._apply_windows_frameless_fix = lambda: None
+        self._ensure_screen_scale_tracking = lambda: None
+        self._sync_mouse_passthrough_timer = lambda: None
+        self._apply_game_topmost_state = lambda: None
+        self._live2d_mutual_gaze_enabled = False
+        self._show_pos_set = True
+        self._game_topmost = False
+        self.compact_syncs = []
+        self._sync_compact_ai_window = lambda **kwargs: self.compact_syncs.append(kwargs)
+
+
+def saved_placement(geometry, x, y, width, height):
+    return {
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "screen_available_geometry": [
+            geometry.x(), geometry.y(), geometry.width(), geometry.height(),
+        ],
+        "relative_x": (x - geometry.x()) / max(1, geometry.width() - width),
+        "relative_y": (y - geometry.y()) / max(1, geometry.height() - height),
+    }
 
 
 class FakeModelManager:
@@ -365,6 +447,102 @@ class PetWindowPositioningTest(unittest.TestCase):
         harness._live2d_model_format = MODEL_FORMAT_MOC3
 
         self.assertEqual((400, LIVE2D_MOC3_BASE_HEIGHT), harness._live2d_size())
+
+    def test_position_on_screen_check_after_saved_position_restore(self):
+        geometry = QRect(0, 0, 1707, 1027)
+        placement = saved_placement(geometry, 1307, 995, 500, 625)
+        harness = SavedPositionHarness(FakeScreen(geometry), placement)
+        harness.resize(500, 625)
+        self.assertTrue(harness._try_restore_startup_position())
+
+        self.assertTrue(harness._is_position_on_screen())
+        harness.move(2000, 1200)
+        self.assertFalse(harness._is_position_on_screen())
+
+    def test_show_event_keeps_restored_position_without_missing_screen_check(self):
+        harness = StartupShowHarness(FakeScreen(QRect(0, 0, 1707, 1027)))
+        harness.resize(500, 625)
+        harness.move(1207, 402)
+
+        harness.showEvent(QShowEvent())
+
+        self.assertEqual((1207, 402), (harness.x(), harness.y()))
+        self.assertEqual([{"allow_create": True}], harness.compact_syncs)
+
+    def test_moc3_to_moc_restores_actual_position_on_same_screen(self):
+        geometry = QRect(0, 0, 1707, 1027)
+        placement = saved_placement(geometry, 1000, 67, 500, 1000)
+        harness = SavedPositionHarness(FakeScreen(geometry), placement)
+        harness.resize(500, 625)
+
+        self.assertTrue(harness._try_restore_startup_position())
+
+        self.assertEqual((1000, 67), (harness.x(), harness.y()))
+        self.assertFalse(harness._startup_position_restore_pending)
+
+    def test_startup_recovers_current_moc_position_with_only_transparent_edge_visible(self):
+        geometry = QRect(0, 0, 1707, 1027)
+        placement = saved_placement(geometry, 1307, 995, 500, 625)
+        harness = SavedPositionHarness(FakeScreen(geometry), placement)
+        harness.resize(500, 625)
+
+        self.assertEqual((1207, 402), harness._saved_position("live2d"))
+
+    def test_moc_to_moc3_restores_window_inside_screen(self):
+        geometry = QRect(0, 0, 1707, 1027)
+        placement = saved_placement(geometry, 1000, 402, 500, 625)
+        harness = SavedPositionHarness(FakeScreen(geometry), placement)
+        harness.resize(500, 1000)
+
+        self.assertEqual((1000, 27), harness._saved_position("live2d"))
+
+    def test_switch_from_model_taller_than_screen_preserves_actual_position(self):
+        geometry = QRect(0, 0, 1707, 1027)
+        placement = saved_placement(geometry, 1000, 60, 500, 1250)
+        harness = SavedPositionHarness(FakeScreen(geometry), placement)
+        harness.resize(500, 625)
+
+        self.assertEqual((1000, 60), harness._saved_position("live2d"))
+
+    def test_changed_screen_geometry_still_restores_relative_placement(self):
+        placement = saved_placement(QRect(0, 0, 1920, 1080), 1520, 580, 400, 500)
+        harness = SavedPositionHarness(FakeScreen(QRect(0, 0, 2560, 1440)), placement)
+        harness.resize(600, 750)
+
+        self.assertEqual((1960, 690), harness._saved_position("live2d"))
+
+    def test_format_switch_preserves_position_on_negative_coordinate_screen(self):
+        geometry = QRect(-1920, 0, 1920, 1080)
+        placement = saved_placement(geometry, -1900, 100, 500, 1000)
+        harness = SavedPositionHarness(FakeScreen(geometry), placement)
+        harness.resize(500, 625)
+
+        self.assertEqual((-1900, 100), harness._saved_position("live2d"))
+
+    def test_legacy_live2d_position_recovers_on_correct_monitor(self):
+        harness = SavedPositionHarness(FakeScreen(QRect(0, 0, 1707, 1027)), x=-1500, y=995)
+        harness.screens.append(FakeScreen(QRect(-1707, 0, 1707, 1027)))
+        harness.resize(500, 625)
+
+        self.assertEqual((-1500, 402), harness._saved_position("live2d"))
+
+    def test_pixel_position_can_still_be_partially_offscreen(self):
+        geometry = QRect(0, 0, 1707, 1027)
+        placement = saved_placement(geometry, 1600, 995, 100, 100)
+        harness = SavedPositionHarness(FakeScreen(geometry), placement, mode="pixel")
+        harness.resize(100, 100)
+
+        self.assertEqual((1600, 995), harness._saved_position("pixel"))
+
+    def test_global_position_offset_is_constrained_after_restore(self):
+        geometry = QRect(0, 0, 1707, 1027)
+        harness = SavedPositionHarness(FakeScreen(geometry))
+        harness._cfg = FakeConfig({
+            "window_placement": saved_placement(geometry, 1307, 995, 500, 625),
+        })
+        harness.resize(500, 625)
+
+        self.assertEqual((1207, 402), harness._saved_position("live2d", offset_x=36))
 
     def test_save_config_does_not_rewrite_models_after_remote_model_update(self):
         harness = SaveConfigHarness()

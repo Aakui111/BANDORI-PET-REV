@@ -32,6 +32,16 @@ class LuaLive2DModuleMOC(LuaLive2DRuntimeBase):
         self._ensure_runtime()
         return not self._supports_texture_byte_streams
 
+    def _load_lua_runtime_functions(self, lua):
+        super()._load_lua_runtime_functions(lua)
+        # Cubism 2 restores its viewport after drawing clipping masks from
+        # the native draw parameter size. Keep that size in physical pixels,
+        # without changing the logical projection or pointer coordinates.
+        self._resize_renderer = lua.eval(
+            b"function(renderer, w, h) "
+            b"return renderer:get_model().live2DModel:resize(w, h) end"
+        )
+
     def _ensure_runtime(self):
         if self._initialized:
             return

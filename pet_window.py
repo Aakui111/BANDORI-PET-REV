@@ -847,14 +847,22 @@ class PetWindow(QWidget):
             "device_pixel_ratio": device_pixel_ratio,
         }
 
-    def _position_intersects_any_screen(self, x: int, y: int, w: int | None = None, h: int | None = None) -> bool:
+    def _screen_for_position(self, x: int, y: int, w: int | None = None, h: int | None = None):
         w = int(w if w is not None else self.width())
         h = int(h if h is not None else self.height())
         rect = QRect(int(x), int(y), max(1, w), max(1, h))
+        best_screen = None
+        best_area = 0
         for screen in self._all_screens():
-            if screen.availableGeometry().intersects(rect):
-                return True
-        return False
+            intersection = screen.availableGeometry().intersected(rect)
+            area = max(0, intersection.width()) * max(0, intersection.height())
+            if area > best_area:
+                best_screen = screen
+                best_area = area
+        return best_screen
+
+    def _position_intersects_any_screen(self, x: int, y: int, w: int | None = None, h: int | None = None) -> bool:
+        return self._screen_for_position(x, y, w, h) is not None
 
     def _constrain_position_to_screen(self, x: int, y: int, screen, *, allow_partial: bool = True) -> tuple[int, int]:
         if screen is None:
@@ -883,10 +891,18 @@ class PetWindow(QWidget):
         if not isinstance(placement, dict) or screen is None:
             return None
         geo = screen.availableGeometry()
-        rel_x = clamp_float(placement.get("relative_x", 0.5), -4.0, 4.0, 0.5)
-        rel_y = clamp_float(placement.get("relative_y", 0.5), -4.0, 4.0, 0.5)
-        target_x = geo.left() + int(round(rel_x * max(0, geo.width() - self.width())))
-        target_y = geo.top() + int(round(rel_y * max(0, geo.height() - self.height())))
+        saved_geo = _rect_from_list(placement.get("screen_available_geometry"))
+        if saved_geo == geo and placement.get("x") is not None and placement.get("y") is not None:
+            # MOC3 and MOC use different window heights. Reusing a relative
+            # position on the same screen amplifies offsets when the old
+            # window nearly fills (or exceeds) the screen; keep actual coords.
+            target_x = clamp_int(placement["x"], -2147483648, 2147483647, geo.left())
+            target_y = clamp_int(placement["y"], -2147483648, 2147483647, geo.top())
+        else:
+            rel_x = clamp_float(placement.get("relative_x", 0.5), -4.0, 4.0, 0.5)
+            rel_y = clamp_float(placement.get("relative_y", 0.5), -4.0, 4.0, 0.5)
+            target_x = geo.left() + int(round(rel_x * max(0, geo.width() - self.width())))
+            target_y = geo.top() + int(round(rel_y * max(0, geo.height() - self.height())))
         return self._constrain_position_to_screen(target_x, target_y, screen, allow_partial=allow_partial)
 
     def _has_saved_position(self, mode: str) -> bool:
@@ -918,6 +934,10 @@ class PetWindow(QWidget):
         if not self._cfg:
             return None
         entry = self._current_model_entry()
+        # A 32px strip of a transparent Live2D window may contain no model
+        # pixels at all. Restore the whole window so old offscreen positions
+        # and format changes cannot leave an invisible, ungrabbable pet.
+        allow_partial = mode == "pixel"
         if mode == "pixel":
             placement_key = "pixel_window_placement"
             x_key, y_key = "pixel_window_x", "pixel_window_y"
@@ -943,17 +963,18 @@ class PetWindow(QWidget):
         if isinstance(placement, dict) and placement:
             screen = self._screen_for_placement(placement)
             if screen is not None:
-                target = self._position_from_placement(placement, screen)
+                target = self._position_from_placement(placement, screen, allow_partial=allow_partial)
                 if target is None:
                     return None
                 target_x, target_y = target
                 if using_global_fallback:
                     target_x += int(offset_x)
-                return self._constrain_position_to_screen(target_x, target_y, screen)
-            if not (x == -1 and y == -1) and self._position_intersects_any_screen(x, y):
-                if using_global_fallback:
-                    x += int(offset_x)
-                return int(x), int(y)
+                return self._constrain_position_to_screen(target_x, target_y, screen, allow_partial=allow_partial)
+            if not (x == -1 and y == -1):
+                target_x = x + (int(offset_x) if using_global_fallback else 0)
+                screen = self._screen_for_position(target_x, y)
+                if screen is not None:
+                    return self._constrain_position_to_screen(target_x, y, screen, allow_partial=allow_partial)
             fallback_screen = self._fallback_position_screen()
             if fallback_screen is not None:
                 if not (x == -1 and y == -1):
@@ -971,8 +992,9 @@ class PetWindow(QWidget):
             return None
         if using_global_fallback:
             x += int(offset_x)
-        if self._position_intersects_any_screen(x, y):
-            return int(x), int(y)
+        screen = self._screen_for_position(x, y)
+        if screen is not None:
+            return self._constrain_position_to_screen(x, y, screen, allow_partial=allow_partial)
         fallback_screen = self._fallback_position_screen()
         if fallback_screen is not None:
             return self._constrain_position_to_screen(x, y, fallback_screen, allow_partial=False)
