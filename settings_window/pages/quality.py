@@ -106,6 +106,54 @@ class QualityPageMixin:
         scale_row.addWidget(self._live2d_scale_input)
         layout.addLayout(scale_row)
 
+        moc3_crop_label = BodyLabel(_tr("SettingsWindow.moc3_leg_crop"), page)
+        self._moc3_leg_crop_switch = SwitchButton(page)
+        self._moc3_leg_crop_switch.setChecked(self._moc3_leg_crop_enabled)
+        self._moc3_leg_crop_switch.checkedChanged.connect(self._on_moc3_leg_crop_changed)
+        moc3_crop_row = QHBoxLayout()
+        moc3_crop_row.setContentsMargins(0, 0, 0, 0)
+        moc3_crop_row.setSpacing(10)
+        moc3_crop_row.addWidget(moc3_crop_label)
+        moc3_crop_row.addStretch()
+        moc3_crop_row.addWidget(self._moc3_leg_crop_switch)
+        layout.addLayout(moc3_crop_row)
+
+        moc3_crop_hint = BodyLabel(_tr("SettingsWindow.moc3_leg_crop_hint"), page)
+        moc3_crop_hint.setWordWrap(True)
+        layout.addWidget(moc3_crop_hint)
+
+        moc3_height_label = BodyLabel(_tr("SettingsWindow.moc3_visible_height"), page)
+        layout.addWidget(moc3_height_label)
+        moc3_height_row = QHBoxLayout()
+        moc3_height_row.setContentsMargins(0, 0, 0, 0)
+        moc3_height_row.setSpacing(10)
+        self._moc3_visible_height_slider = Slider(Qt.Orientation.Horizontal, page)
+        self._moc3_visible_height_slider.setRange(
+            LIVE2D_MOC3_VISIBLE_HEIGHT_MIN,
+            LIVE2D_MOC3_VISIBLE_HEIGHT_MAX,
+        )
+        self._moc3_visible_height_slider.setValue(self._moc3_visible_height)
+        self._moc3_visible_height_slider.setSingleStep(10)
+        self._moc3_visible_height_slider.valueChanged.connect(self._on_moc3_visible_height_changed)
+        self._moc3_visible_height_input = LineEdit(page)
+        self._moc3_visible_height_input.setFixedWidth(76)
+        self._moc3_visible_height_input.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._moc3_visible_height_input.setValidator(
+            QIntValidator(
+                LIVE2D_MOC3_VISIBLE_HEIGHT_MIN,
+                LIVE2D_MOC3_VISIBLE_HEIGHT_MAX,
+                self,
+            )
+        )
+        self._moc3_visible_height_input.setText(str(self._moc3_visible_height))
+        self._moc3_visible_height_input.editingFinished.connect(
+            self._on_moc3_visible_height_input_finished
+        )
+        moc3_height_row.addWidget(self._moc3_visible_height_slider, 1)
+        moc3_height_row.addWidget(self._moc3_visible_height_input)
+        layout.addLayout(moc3_height_row)
+        self._on_moc3_leg_crop_changed(self._moc3_leg_crop_enabled)
+
         reset_position_row = QHBoxLayout()
         reset_position_row.setContentsMargins(0, 0, 0, 0)
         reset_position_row.setSpacing(10)
@@ -177,6 +225,28 @@ class QualityPageMixin:
 
     def _on_gpu_acceleration_changed(self, checked: bool):
         self._gpu_acceleration = bool(checked)
+
+    def _on_moc3_leg_crop_changed(self, checked: bool):
+        self._moc3_leg_crop_enabled = bool(checked)
+        self._moc3_visible_height_slider.setEnabled(self._moc3_leg_crop_enabled)
+        self._moc3_visible_height_input.setEnabled(self._moc3_leg_crop_enabled)
+
+    def _on_moc3_visible_height_changed(self, value: int):
+        self._moc3_visible_height = clamp_moc3_visible_height(value)
+        self._moc3_visible_height_input.blockSignals(True)
+        self._moc3_visible_height_input.setText(str(self._moc3_visible_height))
+        self._moc3_visible_height_input.blockSignals(False)
+
+    def _on_moc3_visible_height_input_finished(self):
+        try:
+            value = int(self._moc3_visible_height_input.text())
+        except (TypeError, ValueError):
+            value = self._moc3_visible_height
+        self._moc3_visible_height = clamp_moc3_visible_height(value)
+        self._moc3_visible_height_slider.blockSignals(True)
+        self._moc3_visible_height_slider.setValue(self._moc3_visible_height)
+        self._moc3_visible_height_slider.blockSignals(False)
+        self._moc3_visible_height_input.setText(str(self._moc3_visible_height))
 
     def _set_live2d_scale_controls(self, value: int):
         value = clamp_live2d_scale(value, use_device_pixel_ratio_default=True)

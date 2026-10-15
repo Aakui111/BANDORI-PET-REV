@@ -289,6 +289,8 @@ DEFAULTS = {
     "live2d_random_actions_enabled": True,
     "live2d_quality": "balanced",
     "live2d_scale": 0,
+    "moc3_leg_crop_enabled": False,
+    "moc3_visible_height": 500,
     "live2d_hit_alpha_threshold": 8,
     "live2d_lip_sync_max_open": 0.55,
     "live2d_head_tracking_enabled": True,

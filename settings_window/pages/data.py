@@ -541,6 +541,8 @@ class DataManagementPageMixin:
             self._cfg.set("auto_start", self._auto_start_supported and self._auto_start_switch.isChecked())
             self._cfg.set("live2d_quality", self._live2d_quality)
             self._cfg.set("live2d_scale", self._live2d_scale)
+            self._cfg.set("moc3_leg_crop_enabled", self._moc3_leg_crop_enabled)
+            self._cfg.set("moc3_visible_height", self._moc3_visible_height)
             _require_config_saved(self._cfg)
 
 
@@ -868,6 +870,12 @@ class DataManagementPageMixin:
             self._cfg.get("live2d_scale", 0),
             use_device_pixel_ratio_default=True,
         )
+        self._moc3_leg_crop_enabled = bool(
+            self._cfg.get("moc3_leg_crop_enabled", False)
+        )
+        self._moc3_visible_height = clamp_moc3_visible_height(
+            self._cfg.get("moc3_visible_height", LIVE2D_MOC3_VISIBLE_HEIGHT_MIN)
+        )
         self._fps = int(self._cfg.get("fps", self._fps) or self._fps)
         self._opacity = float(self._cfg.get("opacity", self._opacity) or self._opacity)
         self._vsync = bool(self._cfg.get("vsync", self._vsync))
@@ -931,6 +939,17 @@ class DataManagementPageMixin:
             self._live2d_scale_slider.setValue(self._live2d_scale)
             self._live2d_scale_slider.blockSignals(False)
             self._live2d_scale_input.setText(str(self._live2d_scale))
+        if hasattr(self, "_moc3_leg_crop_switch"):
+            self._moc3_leg_crop_switch.blockSignals(True)
+            self._moc3_leg_crop_switch.setChecked(self._moc3_leg_crop_enabled)
+            self._moc3_leg_crop_switch.blockSignals(False)
+            self._moc3_visible_height_slider.blockSignals(True)
+            self._moc3_visible_height_slider.setValue(self._moc3_visible_height)
+            self._moc3_visible_height_slider.blockSignals(False)
+            self._moc3_visible_height_input.blockSignals(True)
+            self._moc3_visible_height_input.setText(str(self._moc3_visible_height))
+            self._moc3_visible_height_input.blockSignals(False)
+            self._on_moc3_leg_crop_changed(self._moc3_leg_crop_enabled)
         if hasattr(self, "_fps_slider"):
             self._fps_slider.blockSignals(True)
             self._fps_slider.setValue(max(30, min(240, self._fps)))

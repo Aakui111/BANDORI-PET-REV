@@ -7,6 +7,11 @@ from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from process_utils import interaction_trace
 from qt_gl import gl
+from live2d_quality import (
+    LIVE2D_MOC3_BASE_HEIGHT,
+    LIVE2D_MOC3_VISIBLE_HEIGHT_MIN,
+    clamp_moc3_visible_height,
+)
 
 
 DEFAULT_HIT_ALPHA_THRESHOLD = 8
@@ -93,6 +98,7 @@ class _Live2DPerfProbe:
 class Live2DWidgetBase(QOpenGLWidget):
     model_loaded = Signal()
     input_region_ready = Signal(object)
+    moc3_crop_failed = Signal()
 
     @staticmethod
     def configure_default_surface_format(vsync: bool | None = None):
@@ -112,6 +118,9 @@ class Live2DWidgetBase(QOpenGLWidget):
         self._renderer_target_size = None
         self._model_logical_size = None
         self._system_scale = 1.0
+        self._moc3_leg_crop_enabled = False
+        self._moc3_visible_height = LIVE2D_MOC3_VISIBLE_HEIGHT_MIN
+        self._moc3_crop_fallback_reported = False
         
         self._dragging = False
         self._system_move_active = False
@@ -207,15 +216,69 @@ class Live2DWidgetBase(QOpenGLWidget):
             return 1
         return self._render_pipeline.ssaa_scale(self._quality_profile)
 
+    def _moc3_crop_ratio(self):
+        if (
+            not getattr(self, "_moc3_leg_crop_enabled", False)
+            or not getattr(
+                getattr(self, "_render_pipeline", None),
+                "supports_leg_crop",
+                False,
+            )
+        ):
+            return None
+        visible_height = clamp_moc3_visible_height(
+            getattr(self, "_moc3_visible_height", LIVE2D_MOC3_VISIBLE_HEIGHT_MIN)
+        )
+        if visible_height >= LIVE2D_MOC3_BASE_HEIGHT:
+            return None
+        return LIVE2D_MOC3_BASE_HEIGHT / float(visible_height)
+
+    def _moc3_render_target_height(self, output_height: int) -> int:
+        ratio = Live2DWidgetBase._moc3_crop_ratio(self)
+        if ratio is None:
+            return max(1, int(output_height))
+        return max(int(output_height), int(round(int(output_height) * ratio)))
+
+    def set_moc3_leg_crop(self, enabled: bool, visible_height: int):
+        enabled = bool(enabled)
+        visible_height = clamp_moc3_visible_height(visible_height)
+        changed = (
+            enabled != self._moc3_leg_crop_enabled
+            or visible_height != self._moc3_visible_height
+        )
+        if not changed:
+            return
+        self._moc3_leg_crop_enabled = enabled
+        self._moc3_visible_height = visible_height
+        self._moc3_crop_fallback_reported = False
+        self._reset_hit_stability()
+        if (
+            self._initialized_gl
+            and self._model
+            and getattr(self._render_pipeline, "supports_leg_crop", False)
+        ):
+            self._safe_make_current()
+            self._sync_model_logical_size(force=True)
+            self._sync_renderer_target_size(force=True)
+        self.update()
+
+    def _request_moc3_crop_fallback(self):
+        if self._moc3_crop_fallback_reported:
+            return
+        self._moc3_crop_fallback_reported = True
+        self.moc3_crop_failed.emit()
+
     def _sync_renderer_target_size(self, *, force: bool = False):
         model = self._model
         if not model:
             self._renderer_target_size = None
             return
         scale = self._render_ssaa_scale()
+        output_width = max(1, int(self._cache_w * self._system_scale))
+        output_height = max(1, int(self._cache_h * self._system_scale))
         target_size = (
-            max(1, int(self._cache_w * self._system_scale) * scale),
-            max(1, int(self._cache_h * self._system_scale) * scale),
+            output_width * scale,
+            Live2DWidgetBase._moc3_render_target_height(self, output_height) * scale,
         )
         if force or target_size != self._renderer_target_size:
             model.ResizeRenderer(*target_size)
@@ -226,7 +289,11 @@ class Live2DWidgetBase(QOpenGLWidget):
         if not model:
             self._model_logical_size = None
             return False
-        logical_size = (max(1, int(self._cache_w)), max(1, int(self._cache_h)))
+        logical_height = max(1, int(self._cache_h))
+        crop_ratio = Live2DWidgetBase._moc3_crop_ratio(self)
+        if crop_ratio is not None:
+            logical_height = max(logical_height, int(round(logical_height * crop_ratio)))
+        logical_size = (max(1, int(self._cache_w)), logical_height)
         if not force and logical_size == self._model_logical_size:
             return False
         model.Resize(*logical_size)
@@ -1005,15 +1072,38 @@ class Live2DWidgetBase(QOpenGLWidget):
         target_h = max(1, int(self._cache_h * self._system_scale))
         gl.glViewport(0, 0, target_w, target_h)
         ssaa_scale = self._render_ssaa_scale()
+        render_h = Live2DWidgetBase._moc3_render_target_height(self, target_h)
+        crop_active = render_h > target_h
         using_ssaa = False
         if ssaa_scale > 1:
-            if self._ssaa_fbo is None:
-                self._ssaa_fbo = self._render_pipeline.create_framebuffer()
-            if self._ssaa_fbo is not None:
-                using_ssaa = self._ssaa_fbo.bind(target_w * ssaa_scale, target_h * ssaa_scale)
+            try:
+                if self._ssaa_fbo is None:
+                    self._ssaa_fbo = self._render_pipeline.create_framebuffer()
+                if self._ssaa_fbo is not None:
+                    using_ssaa = self._ssaa_fbo.bind(
+                        target_w * ssaa_scale,
+                        render_h * ssaa_scale,
+                    )
+            except Exception:
+                if self._ssaa_fbo is not None:
+                    try:
+                        self._ssaa_fbo.dispose()
+                    except Exception:
+                        pass
+                    self._ssaa_fbo = None
+                if crop_active:
+                    self._request_moc3_crop_fallback()
+                    return
+            if crop_active and not using_ssaa:
+                self._request_moc3_crop_fallback()
+                return
 
         if using_ssaa:
-            gl.glViewport(0, 0, target_w * ssaa_scale, target_h * ssaa_scale)
+            gl.glViewport(0, 0, target_w * ssaa_scale, render_h * ssaa_scale)
+        elif crop_active:
+            gl.glViewport(0, target_h - render_h, target_w, render_h)
+        else:
+            gl.glViewport(0, 0, target_w, target_h)
         gl.glClearColor(*self._clear_color)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_STENCIL_BUFFER_BIT)
 
@@ -1023,7 +1113,17 @@ class Live2DWidgetBase(QOpenGLWidget):
             self._model.Draw()
             if using_ssaa:
                 self._ssaa_fbo.release()
-                if not self._ssaa_fbo.blit_to_default(self.defaultFramebufferObject(), target_w, target_h, self._clear_color):
+                crop_source_height = target_h * ssaa_scale if crop_active else None
+                if not self._ssaa_fbo.blit_to_default(
+                    self.defaultFramebufferObject(),
+                    target_w,
+                    target_h,
+                    self._clear_color,
+                    source_crop_height=crop_source_height,
+                ):
+                    if crop_active:
+                        self._request_moc3_crop_fallback()
+                        return
                     self._ssaa_fbo.draw_direct_to_default(
                         self._model,
                         self.defaultFramebufferObject(),

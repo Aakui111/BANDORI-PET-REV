@@ -150,6 +150,49 @@ def test_moc3_ssaa_fallback_renders_without_advancing_model(monkeypatch):
     assert calls == ["render"]
 
 
+def test_moc3_framebuffer_blit_crops_from_the_top_of_the_virtual_canvas(monkeypatch):
+    calls = []
+
+    class FakeGL:
+        GL_READ_FRAMEBUFFER = 1
+        GL_DRAW_FRAMEBUFFER = 2
+        GL_FRAMEBUFFER = 3
+        GL_COLOR_BUFFER_BIT = 4
+        GL_STENCIL_BUFFER_BIT = 8
+        GL_LINEAR = 5
+
+        def glBindFramebuffer(self, *args):
+            calls.append(("bind", *args))
+
+        def glViewport(self, *args):
+            calls.append(("viewport", *args))
+
+        def glClearColor(self, *args):
+            calls.append(("clear_color", *args))
+
+        def glClear(self, *args):
+            calls.append(("clear", *args))
+
+        def glBlitFramebuffer(self, *args):
+            calls.append(("blit", *args))
+
+    monkeypatch.setattr(live2d_widget_moc3, "gl", FakeGL())
+    framebuffer = live2d_widget_moc3.Live2DSSAAFramebuffer()
+    framebuffer._fbo = SimpleNamespace(handle=lambda: 11)
+    framebuffer._size = (800, 1600)
+
+    assert framebuffer.blit_to_default(
+        default_fbo=7,
+        width=400,
+        height=500,
+        clear_color=(0.0, 0.0, 0.0, 0.0),
+        source_crop_height=1000,
+    )
+
+    blit = next(call[1:] for call in calls if call[0] == "blit")
+    assert blit == (0, 600, 800, 1600, 0, 0, 400, 500, 4, 5)
+
+
 def test_moc3_render_target_size_changes_only_when_needed():
     calls = []
     model = SimpleNamespace(ResizeRenderer=lambda width, height: calls.append((width, height)))

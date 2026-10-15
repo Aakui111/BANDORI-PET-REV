@@ -158,7 +158,15 @@ from live2d_click_actions import (
     CLICK_MOTION_SPECIAL_VALUES,
     normalize_click_motion_actions,
 )
-from live2d_quality import LIVE2D_SCALE_MAX, LIVE2D_SCALE_MIN, clamp_live2d_scale, normalize_live2d_quality
+from live2d_quality import (
+    LIVE2D_MOC3_VISIBLE_HEIGHT_MAX,
+    LIVE2D_MOC3_VISIBLE_HEIGHT_MIN,
+    LIVE2D_SCALE_MAX,
+    LIVE2D_SCALE_MIN,
+    clamp_live2d_scale,
+    clamp_moc3_visible_height,
+    normalize_live2d_quality,
+)
 from ui_helpers import AVATAR_EXTENSIONS, FluentContextTextEdit, rounded_avatar_pixmap
 
 _BG_LIGHT = "#ffffff"
@@ -366,6 +374,8 @@ DATA_CONFIG_KEYS = {
         "drag_locked",
         "live2d_quality",
         "live2d_scale",
+        "moc3_leg_crop_enabled",
+        "moc3_visible_height",
         "fluent_chat_window_enabled",
         "chat_display_names",
         "pinned_chat_keys",

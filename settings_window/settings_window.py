@@ -208,6 +208,13 @@ class SettingsWindow(
             self._cfg.get("live2d_scale", 0) if self._cfg else 0,
             use_device_pixel_ratio_default=True,
         )
+        self._moc3_leg_crop_enabled = bool(
+            self._cfg.get("moc3_leg_crop_enabled", False) if self._cfg else False
+        )
+        self._moc3_visible_height = clamp_moc3_visible_height(
+            self._cfg.get("moc3_visible_height", LIVE2D_MOC3_VISIBLE_HEIGHT_MIN)
+            if self._cfg else LIVE2D_MOC3_VISIBLE_HEIGHT_MIN
+        )
         self._saved_user_name = ""
         self._user_avatar_path_pending = ""
         self._loading_user_profile = False
@@ -3143,6 +3150,8 @@ class SettingsWindow(
             "auto_start": self._auto_start_supported and self._auto_start_switch.isChecked(),
             "live2d_quality": self._live2d_quality,
             "live2d_scale": self._live2d_scale,
+            "moc3_leg_crop_enabled": self._moc3_leg_crop_enabled,
+            "moc3_visible_height": self._moc3_visible_height,
             "compact_ai_window_enabled": self._cfg.get("compact_ai_window_enabled", False) if self._cfg else False,
             "compact_ai_window_opacity": self._cfg.get("compact_ai_window_opacity", 44) if self._cfg else 44,
             "compact_ai_window_font_size": self._cfg.get("compact_ai_window_font_size", 12) if self._cfg else 12,
@@ -3211,6 +3220,8 @@ class SettingsWindow(
             self._cfg.set("auto_start", settings["auto_start"])
             self._cfg.set("live2d_quality", settings["live2d_quality"])
             self._cfg.set("live2d_scale", settings["live2d_scale"])
+            self._cfg.set("moc3_leg_crop_enabled", settings["moc3_leg_crop_enabled"])
+            self._cfg.set("moc3_visible_height", settings["moc3_visible_height"])
             try:
                 _require_config_saved(self._cfg)
             except Exception:

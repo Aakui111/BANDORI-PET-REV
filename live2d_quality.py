@@ -5,6 +5,9 @@ from PySide6.QtWidgets import QApplication
 
 LIVE2D_SCALE_MIN = 25
 LIVE2D_SCALE_MAX = 500
+LIVE2D_MOC3_BASE_HEIGHT = 800
+LIVE2D_MOC3_VISIBLE_HEIGHT_MIN = 500
+LIVE2D_MOC3_VISIBLE_HEIGHT_MAX = LIVE2D_MOC3_BASE_HEIGHT
 
 LIVE2D_QUALITY_PROFILES = {
     "performance": {
@@ -22,6 +25,14 @@ LIVE2D_QUALITY_PROFILES = {
 
 def normalize_live2d_quality(profile: str) -> str:
     return profile if profile in LIVE2D_QUALITY_PROFILES else "balanced"
+
+
+def clamp_moc3_visible_height(value: Any, default: int = LIVE2D_MOC3_VISIBLE_HEIGHT_MIN) -> int:
+    try:
+        height = int(round(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        height = default
+    return max(LIVE2D_MOC3_VISIBLE_HEIGHT_MIN, min(LIVE2D_MOC3_VISIBLE_HEIGHT_MAX, height))
 
 
 def clamp_live2d_scale(value: Any, default: int = 100, use_device_pixel_ratio_default: bool = False) -> int:

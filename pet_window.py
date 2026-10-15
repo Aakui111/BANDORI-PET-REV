@@ -27,7 +27,13 @@ from shiboken6 import isValid
 from app_theme import apply_app_theme, BANDORI_PRIMARY
 from action_bus import publish_user_poke
 from i18n_manager import tr as _tr, set_language
-from live2d_quality import clamp_live2d_scale, normalize_live2d_quality
+from live2d_quality import (
+    LIVE2D_MOC3_BASE_HEIGHT,
+    LIVE2D_MOC3_VISIBLE_HEIGHT_MIN,
+    clamp_live2d_scale,
+    clamp_moc3_visible_height,
+    normalize_live2d_quality,
+)
 from live2d_widget import DEFAULT_HIT_ALPHA_THRESHOLD, DEFAULT_LIP_SYNC_MAX_OPEN, Live2DWidget
 from model_manager import MODEL_FORMAT_MOC3, ModelManager
 from outfit_description_config import (
@@ -228,7 +234,6 @@ def _set_x11_input_passthrough(window, enabled: bool) -> bool:
 
 LIVE2D_BASE_WIDTH = 400
 LIVE2D_BASE_HEIGHT = 500
-LIVE2D_MOC3_BASE_HEIGHT = 800
 LIVE2D_CONTEXT_IDLE_INTERVAL_MS = 5000
 LIVE2D_DAZE_AFTER_SECONDS = 7 * 60
 LIVE2D_SLEEP_AFTER_SECONDS = 18 * 60
@@ -390,6 +395,14 @@ class PetWindow(QWidget):
         self._live2d_quality = "balanced"
         self._live2d_scale = 100
         self._live2d_model_format = ""
+        self._moc3_leg_crop_enabled = bool(
+            config_manager.get("moc3_leg_crop_enabled", False) if config_manager else False
+        )
+        self._moc3_visible_height = clamp_moc3_visible_height(
+            config_manager.get("moc3_visible_height", LIVE2D_MOC3_VISIBLE_HEIGHT_MIN)
+            if config_manager else LIVE2D_MOC3_VISIBLE_HEIGHT_MIN
+        )
+        self._moc3_crop_runtime_disabled = False
         self._live2d_hit_alpha_threshold = DEFAULT_HIT_ALPHA_THRESHOLD
         self._live2d_lip_sync_max_open = DEFAULT_LIP_SYNC_MAX_OPEN
         self._tray_icon = None
@@ -606,6 +619,11 @@ class PetWindow(QWidget):
         self._live2d_widget.set_right_click_callback(self._on_right_click)
         self._live2d_widget.set_fps(self._fps)
         self._live2d_widget.set_render_quality(self._live2d_quality)
+        self._live2d_widget.set_moc3_leg_crop(
+            self._moc3_leg_crop_enabled,
+            self._moc3_visible_height,
+        )
+        self._live2d_widget.moc3_crop_failed.connect(self._on_moc3_crop_render_failed)
         self._live2d_widget.set_hit_alpha_threshold(self._live2d_hit_alpha_threshold)
         self._live2d_widget.set_lip_sync_max_open(self._live2d_lip_sync_max_open)
         self._live2d_widget.set_head_tracking_enabled(self._live2d_head_tracking_enabled)
@@ -3131,6 +3149,11 @@ class PetWindow(QWidget):
             self._live2d_widget.set_render_quality(self._live2d_quality)
         if "live2d_scale" in data:
             self.set_live2d_scale(data["live2d_scale"])
+        if "moc3_leg_crop_enabled" in data or "moc3_visible_height" in data:
+            self.set_moc3_leg_crop(
+                data.get("moc3_leg_crop_enabled", self._moc3_leg_crop_enabled),
+                data.get("moc3_visible_height", self._moc3_visible_height),
+            )
         if "live2d_hit_alpha_threshold" in data:
             self._live2d_hit_alpha_threshold = clamp_int(
                 data["live2d_hit_alpha_threshold"],
@@ -3179,11 +3202,15 @@ class PetWindow(QWidget):
 
     def _live2d_size(self):
         scale = self._live2d_scale / 100.0
-        base_height = (
-            LIVE2D_MOC3_BASE_HEIGHT
-            if self._live2d_model_format == MODEL_FORMAT_MOC3
-            else LIVE2D_BASE_HEIGHT
-        )
+        if self._live2d_model_format == MODEL_FORMAT_MOC3:
+            base_height = (
+                getattr(self, "_moc3_visible_height", LIVE2D_MOC3_VISIBLE_HEIGHT_MIN)
+                if getattr(self, "_moc3_leg_crop_enabled", False)
+                and not getattr(self, "_moc3_crop_runtime_disabled", False)
+                else LIVE2D_MOC3_BASE_HEIGHT
+            )
+        else:
+            base_height = LIVE2D_BASE_HEIGHT
         return int(round(LIVE2D_BASE_WIDTH * scale)), int(round(base_height * scale))
 
     def _set_live2d_model_format(self, model_format: str):
@@ -3199,6 +3226,38 @@ class PetWindow(QWidget):
         if not self._pixel_mode:
             self.setFixedSize(*self._live2d_size())
         self._sync_compact_ai_window()
+
+    def set_moc3_leg_crop(self, enabled: object, visible_height: object):
+        enabled = bool(enabled)
+        visible_height = clamp_moc3_visible_height(visible_height)
+        if (
+            enabled != self._moc3_leg_crop_enabled
+            or visible_height != self._moc3_visible_height
+        ):
+            self._moc3_crop_runtime_disabled = False
+        self._moc3_leg_crop_enabled = enabled
+        self._moc3_visible_height = visible_height
+        if hasattr(self, "_live2d_widget"):
+            self._live2d_widget.set_moc3_leg_crop(
+                self._moc3_leg_crop_enabled and not self._moc3_crop_runtime_disabled,
+                self._moc3_visible_height,
+            )
+        if not self._pixel_mode:
+            self.setFixedSize(*self._live2d_size())
+        self._sync_compact_ai_window()
+
+    def _on_moc3_crop_render_failed(self):
+        if not self._moc3_leg_crop_enabled or self._moc3_crop_runtime_disabled:
+            return
+        self._moc3_crop_runtime_disabled = True
+        print(
+            "MOC3 crop render target failed; restoring the full-height pet window",
+            file=sys.stderr,
+            flush=True,
+        )
+        self._live2d_widget.set_moc3_leg_crop(False, self._moc3_visible_height)
+        if not self._pixel_mode:
+            self.setFixedSize(*self._live2d_size())
 
     def reset_position(self):
         screen = QGuiApplication.primaryScreen() or self._fallback_position_screen()
