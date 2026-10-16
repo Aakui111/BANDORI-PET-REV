@@ -120,6 +120,7 @@ class NativeDragAnchorHarness:
 
 class ScaleHarness(QWidget):
     _live2d_size = PetWindow._live2d_size
+    _set_live2d_model_format = PetWindow._set_live2d_model_format
     set_live2d_scale = PetWindow.set_live2d_scale
 
     def __init__(self):
@@ -127,6 +128,22 @@ class ScaleHarness(QWidget):
         self._pixel_mode = False
         self._live2d_scale = 100
         self._live2d_model_format = ""
+        self._live2d_model_identifier = ""
+        self._live2d_model_path = ""
+        self._moc3_stage_model = False
+        self._moc3_stage_canvas_aspect = None
+        self._moc3_stage_canvas_height = None
+        self._moc3_stage_content_half_width = None
+        self._moc3_stage_content_half_height = None
+        self._moc3_crop_runtime_disabled = False
+        self._moc3_leg_crop_enabled = False
+        self._moc3_visible_height = 500
+
+    def set_stage_canvas_bounds(self, aspect, canvas_height, half_width, half_height):
+        self._moc3_stage_canvas_aspect = aspect
+        self._moc3_stage_canvas_height = canvas_height
+        self._moc3_stage_content_half_width = half_width
+        self._moc3_stage_content_half_height = half_height
 
     def _sync_compact_ai_window(self):
         pass
@@ -447,6 +464,46 @@ class PetWindowPositioningTest(unittest.TestCase):
         harness._live2d_model_format = MODEL_FORMAT_MOC3
 
         self.assertEqual((400, LIVE2D_MOC3_BASE_HEIGHT), harness._live2d_size())
+
+    def test_stage_moc3_uses_content_bounds_and_ignores_leg_crop(self):
+        harness = ScaleHarness()
+        harness._set_live2d_model_format(MODEL_FORMAT_MOC3, "live_01_stage")
+        harness.set_stage_canvas_bounds(
+            aspect=2 / 3,
+            canvas_height=900,
+            half_width=381,
+            half_height=300,
+        )
+
+        self.assertEqual((774, LIVE2D_MOC3_BASE_HEIGHT), harness._live2d_size())
+        harness._moc3_leg_crop_enabled = True
+        self.assertEqual((774, LIVE2D_MOC3_BASE_HEIGHT), harness._live2d_size())
+        harness._moc3_visible_height = 800
+        self.assertEqual((774, LIVE2D_MOC3_BASE_HEIGHT), harness._live2d_size())
+
+    def test_stage_moc3_wide_canvas_and_global_scale_are_applied(self):
+        harness = ScaleHarness()
+        harness._set_live2d_model_format(MODEL_FORMAT_MOC3, "LIVE_01_STAGE")
+        harness.set_stage_canvas_bounds(
+            aspect=14 / 9,
+            canvas_height=900,
+            half_width=700,
+            half_height=450,
+        )
+        harness.set_live2d_scale(200)
+
+        self.assertEqual((1218, 1600), (harness.width(), harness.height()))
+
+    def test_regular_moc3_and_moc_keep_existing_window_proportions(self):
+        harness = ScaleHarness()
+        harness._set_live2d_model_format(MODEL_FORMAT_MOC3, "live_01")
+        harness._moc3_stage_canvas_aspect = 2 / 3
+        self.assertEqual((400, LIVE2D_MOC3_BASE_HEIGHT), harness._live2d_size())
+        harness._moc3_leg_crop_enabled = True
+        self.assertEqual((400, 500), harness._live2d_size())
+
+        harness._set_live2d_model_format("moc", "live_01_stage")
+        self.assertEqual((400, 500), harness._live2d_size())
 
     def test_position_on_screen_check_after_saved_position_restore(self):
         geometry = QRect(0, 0, 1707, 1027)

@@ -10,6 +10,29 @@ from live2d_widget_moc3 import MOC3_RENDER_PIPELINE
 
 
 class Live2DMocDpiTest(unittest.TestCase):
+    def test_lip_sync_keeps_moc2_parameter_ids_for_adapter_aliasing(self):
+        calls = []
+        harness = SimpleNamespace(
+            _hit_clock=SimpleNamespace(isValid=lambda: True, elapsed=lambda: 100),
+            _lip_sync_target=0.8,
+            _lip_sync_form_target=0.25,
+            _lip_sync_last_ms=100,
+            _lip_sync_level=0.0,
+            _lip_sync_form=0.0,
+            _model=SimpleNamespace(
+                SetParameterValue=lambda *args: calls.append(args),
+            ),
+        )
+
+        Live2DWidgetBase._apply_lip_sync(harness)
+
+        self.assertEqual(
+            ["PARAM_MOUTH_OPEN_Y", "PARAM_MOUTH_FORM"],
+            [call[0] for call in calls],
+        )
+        self.assertAlmostEqual(0.44, calls[0][1])
+        self.assertAlmostEqual(0.1125, calls[1][1])
+
     def test_moc_render_target_uses_physical_size_without_resizing_projection(self):
         calls = []
         harness = SimpleNamespace(

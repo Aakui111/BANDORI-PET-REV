@@ -1,9 +1,10 @@
 import sys
 from PySide6.QtOpenGL import QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat
+from live2d_quality import LIVE2D_MOC3_RENDER_SCALE
 from qt_gl import gl
 
 
-DEFAULT_MOC3_RENDER_SCALE = 1.45
+DEFAULT_MOC3_RENDER_SCALE = LIVE2D_MOC3_RENDER_SCALE
 MOC3_BALANCED_SSAA_SCALE = 2
 
 

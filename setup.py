@@ -19,6 +19,8 @@ from cx_Freeze.command.bdist_mac import bdist_mac
 from cx_Freeze.command.bdist_msi import bdist_msi
 from cx_Freeze.command.build_exe import build_exe
 
+from live2d_lua_moc3_source_patch import patch_live2d_lua_moc3_module
+
 
 BASE_DIR = Path(__file__).resolve().parent
 BYTECODE_BUILD_DIR = BASE_DIR / "BUILD" / ".luajit-bytecode"
@@ -66,6 +68,18 @@ class BuildExeWithEmptyModels(build_exe):
         if BYTECODE_BUILD_DIR.exists():
             shutil.rmtree(BYTECODE_BUILD_DIR)
         build_dir = Path(self.build_exe)
+        pyside_source = Path(importlib.import_module("PySide6").__file__).resolve().parent
+        pyside_icu_names = {
+            path.name.casefold()
+            for path in pyside_source.rglob("icu*.dll")
+        }
+        bundled_pyside_dir = build_dir / "lib" / "PySide6"
+        if bundled_pyside_dir.is_dir():
+            for path in bundled_pyside_dir.glob("icu*.dll"):
+                if path.name.casefold() not in pyside_icu_names:
+                    # cx_Freeze can resolve ICU from unrelated packages on PATH
+                    # (such as Poppler), which is incompatible with Qt6Core.
+                    path.unlink()
         for filename in USER_DATA_FILENAMES:
             path = build_dir / filename
             if path.exists():
@@ -415,6 +429,7 @@ def _compiled_lua_include(path: str, dest_path: str | None = None) -> tuple[str,
         module_name = ".".join(module_parts)
         source = src.read_bytes()
         patched = patch_live2d_lua_module(module_name, source)
+        patched = patch_live2d_lua_moc3_module(module_name, patched)
         if patched != source:
             compile_src = BYTECODE_BUILD_DIR / ".patched-source" / src.relative_to(BASE_DIR)
             compile_src.parent.mkdir(parents=True, exist_ok=True)

@@ -522,6 +522,34 @@ class Live2DWidgetBase(QOpenGLWidget):
             self._load_model_internal(model_json_path)
             self.update()
 
+    def model_canvas_size(self) -> tuple[float, float] | None:
+        get_canvas_size = getattr(self._model, "GetCanvasSize", None)
+        if not callable(get_canvas_size):
+            return None
+        try:
+            return get_canvas_size()
+        except Exception:
+            return None
+
+    def model_canvas_content_bounds(self) -> tuple[float, float, float, float, float] | None:
+        get_content_bounds = getattr(self._model, "GetCanvasContentBounds", None)
+        if not callable(get_content_bounds):
+            return None
+        try:
+            return get_content_bounds()
+        except Exception:
+            return None
+
+    def set_model_render_scale(self, scale: float):
+        if not self._model:
+            return
+        try:
+            self._safe_make_current()
+            self._model.SetScale(float(scale))
+            self.update()
+        except Exception as exc:
+            print(f"Failed to update Live2D model scale: {exc}", file=sys.stderr)
+
     # --------------------------------------------------------------------------
     # Model loading
     # --------------------------------------------------------------------------

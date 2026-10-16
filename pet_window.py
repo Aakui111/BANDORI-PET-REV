@@ -1,6 +1,7 @@
 import ctypes
 import ctypes.util
 import json
+import math
 import os
 import random
 import re
@@ -29,6 +30,7 @@ from action_bus import publish_user_poke
 from i18n_manager import tr as _tr, set_language
 from live2d_quality import (
     LIVE2D_MOC3_BASE_HEIGHT,
+    LIVE2D_MOC3_RENDER_SCALE,
     LIVE2D_MOC3_VISIBLE_HEIGHT_MIN,
     clamp_live2d_scale,
     clamp_moc3_visible_height,
@@ -395,6 +397,13 @@ class PetWindow(QWidget):
         self._live2d_quality = "balanced"
         self._live2d_scale = 100
         self._live2d_model_format = ""
+        self._live2d_model_identifier = ""
+        self._live2d_model_path = ""
+        self._moc3_stage_model = False
+        self._moc3_stage_canvas_aspect = None
+        self._moc3_stage_canvas_height = None
+        self._moc3_stage_content_half_width = None
+        self._moc3_stage_content_half_height = None
         self._moc3_leg_crop_enabled = bool(
             config_manager.get("moc3_leg_crop_enabled", False) if config_manager else False
         )
@@ -619,10 +628,7 @@ class PetWindow(QWidget):
         self._live2d_widget.set_right_click_callback(self._on_right_click)
         self._live2d_widget.set_fps(self._fps)
         self._live2d_widget.set_render_quality(self._live2d_quality)
-        self._live2d_widget.set_moc3_leg_crop(
-            self._moc3_leg_crop_enabled,
-            self._moc3_visible_height,
-        )
+        self._apply_moc3_leg_crop_to_widget()
         self._live2d_widget.moc3_crop_failed.connect(self._on_moc3_crop_render_failed)
         self._live2d_widget.set_hit_alpha_threshold(self._live2d_hit_alpha_threshold)
         self._live2d_widget.set_lip_sync_max_open(self._live2d_lip_sync_max_open)
@@ -2187,8 +2193,13 @@ class PetWindow(QWidget):
             self._current_char, self._current_costume
         )
         if path:
+            model_format = self._model_manager.get_model_format(
+                self._current_char, self._current_costume
+            )
             self._set_live2d_model_format(
-                self._model_manager.get_model_format(self._current_char, self._current_costume)
+                model_format,
+                model_identifier=self._current_costume,
+                model_path=path,
             )
             if self._pixel_mode:
                 if self._enable_pixel_mode(save=False):
@@ -2287,6 +2298,16 @@ class PetWindow(QWidget):
         return mode if mode in {"live2d", "pixel"} else "live2d"
 
     def _on_live2d_model_loaded(self):
+        if self._moc3_stage_model:
+            model_identifier = self._live2d_model_identifier
+            self._update_moc3_stage_canvas_size(model_identifier)
+            # GL model loading can happen while the top-level widget is still
+            # being shown. Re-apply after that resize/layout pass so the
+            # native pet window keeps the stage canvas width.
+            QTimer.singleShot(
+                0,
+                lambda identifier=model_identifier: self._update_moc3_stage_canvas_size(identifier),
+            )
         self._cancel_outfit_description_workers()
         self._motion_guard_token += 1
         self._live2d_prewarm_token += 1
@@ -3200,24 +3221,205 @@ class PetWindow(QWidget):
             self._position_save_timer.stop()
             self._save_position_config()
 
+    def _moc3_crop_active(self):
+        return (
+            self._live2d_model_format == MODEL_FORMAT_MOC3
+            and self._moc3_leg_crop_enabled
+            and not self._moc3_stage_model
+            and not self._moc3_crop_runtime_disabled
+            and self._moc3_visible_height < LIVE2D_MOC3_BASE_HEIGHT
+        )
+
+    def _apply_moc3_leg_crop_to_widget(self):
+        if not hasattr(self, "_live2d_widget"):
+            return
+        apply_crop = (
+            self._live2d_model_format == MODEL_FORMAT_MOC3
+            and self._moc3_leg_crop_enabled
+            and not self._moc3_stage_model
+            and not self._moc3_crop_runtime_disabled
+        )
+        self._live2d_widget.set_moc3_leg_crop(
+            apply_crop,
+            self._moc3_visible_height,
+        )
+
     def _live2d_size(self):
         scale = self._live2d_scale / 100.0
+        base_width = LIVE2D_BASE_WIDTH
         if self._live2d_model_format == MODEL_FORMAT_MOC3:
+            crop_active = self._moc3_crop_active()
             base_height = (
                 getattr(self, "_moc3_visible_height", LIVE2D_MOC3_VISIBLE_HEIGHT_MIN)
-                if getattr(self, "_moc3_leg_crop_enabled", False)
-                and not getattr(self, "_moc3_crop_runtime_disabled", False)
+                if crop_active
                 else LIVE2D_MOC3_BASE_HEIGHT
             )
+            if getattr(self, "_moc3_stage_model", False):
+                stage_size = self._moc3_stage_base_size()
+                if stage_size is not None:
+                    base_width = max(base_width, stage_size[0])
+                    if not crop_active:
+                        base_height = max(base_height, stage_size[1])
         else:
             base_height = LIVE2D_BASE_HEIGHT
-        return int(round(LIVE2D_BASE_WIDTH * scale)), int(round(base_height * scale))
+        return int(round(base_width * scale)), int(round(base_height * scale))
 
-    def _set_live2d_model_format(self, model_format: str):
+    def _moc3_stage_reference_render_scale(self):
+        aspect = getattr(self, "_moc3_stage_canvas_aspect", None)
+        canvas_height = getattr(self, "_moc3_stage_canvas_height", None)
+        try:
+            aspect = float(aspect or 0)
+            canvas_height = float(canvas_height or 0)
+            if (
+                not math.isfinite(aspect)
+                or aspect <= 0
+                or not math.isfinite(canvas_height)
+                or canvas_height <= 0
+            ):
+                return None
+            canvas_width = aspect * canvas_height
+            return min(
+                LIVE2D_BASE_WIDTH / canvas_width,
+                LIVE2D_MOC3_BASE_HEIGHT / canvas_height,
+            ) * LIVE2D_MOC3_RENDER_SCALE
+        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+            return None
+
+    def _moc3_stage_base_size(self):
+        reference_scale = self._moc3_stage_reference_render_scale()
+        content_half_height = getattr(self, "_moc3_stage_content_half_height", None)
+        content_half_width = getattr(self, "_moc3_stage_content_half_width", None)
+        canvas_height = getattr(self, "_moc3_stage_canvas_height", None)
+        try:
+            content_half_width = float(content_half_width or 0)
+            content_half_height = float(content_half_height or 0)
+            canvas_height = float(canvas_height or 0)
+            if (
+                reference_scale is None
+                or not math.isfinite(content_half_width)
+                or content_half_width <= 0
+                or not math.isfinite(content_half_height)
+                or content_half_height <= 0
+                or not math.isfinite(canvas_height)
+                or canvas_height <= 0
+            ):
+                return None
+            return (
+                max(
+                    LIVE2D_BASE_WIDTH,
+                    int(math.ceil(2.0 * content_half_width * reference_scale * 1.05)),
+                ),
+                max(
+                    LIVE2D_MOC3_BASE_HEIGHT,
+                    int(math.ceil(2.0 * content_half_height * reference_scale * 1.05)),
+                ),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _moc3_stage_render_scale(self):
+        crop_active = self._moc3_crop_active()
+        if getattr(self, "_moc3_stage_model", False):
+            reference_scale = self._moc3_stage_reference_render_scale()
+            stage_size = self._moc3_stage_base_size()
+            canvas_height = getattr(self, "_moc3_stage_canvas_height", None)
+            aspect = getattr(self, "_moc3_stage_canvas_aspect", None)
+            try:
+                canvas_height = float(canvas_height or 0)
+                aspect = float(aspect or 0)
+                if (
+                    reference_scale is not None
+                    and stage_size is not None
+                    and math.isfinite(canvas_height)
+                    and canvas_height > 0
+                    and math.isfinite(aspect)
+                    and aspect > 0
+                ):
+                    canvas_width = aspect * canvas_height
+                    projection_height = (
+                        LIVE2D_MOC3_BASE_HEIGHT if crop_active else stage_size[1]
+                    )
+                    projection_fit_scale = min(
+                        stage_size[0] / canvas_width,
+                        projection_height / canvas_height,
+                    )
+                    if projection_fit_scale > 0:
+                        return reference_scale / projection_fit_scale
+            except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+                pass
+        return LIVE2D_MOC3_RENDER_SCALE
+
+    def _apply_moc3_stage_render_scale(self):
+        if getattr(self, "_moc3_stage_model", False) and hasattr(self, "_live2d_widget"):
+            self._live2d_widget.set_model_render_scale(self._moc3_stage_render_scale())
+
+    def _update_moc3_stage_canvas_size(self, model_identifier: str):
+        if (
+            not self._moc3_stage_model
+            or model_identifier != self._live2d_model_identifier
+        ):
+            return
+        if self._moc3_stage_canvas_aspect is None:
+            canvas_size = self._live2d_widget.model_canvas_size()
+            if isinstance(canvas_size, (tuple, list)) and len(canvas_size) >= 2:
+                try:
+                    width, height = float(canvas_size[0]), float(canvas_size[1])
+                    if math.isfinite(width) and math.isfinite(height) and width > 0 and height > 0:
+                        self._moc3_stage_canvas_aspect = width / height
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        if self._moc3_stage_content_half_width is None:
+            content_bounds = self._live2d_widget.model_canvas_content_bounds()
+            if isinstance(content_bounds, (tuple, list)) and len(content_bounds) >= 5:
+                try:
+                    canvas_height, left, right = map(float, content_bounds[:3])
+                    if (
+                        math.isfinite(canvas_height)
+                        and canvas_height > 0
+                        and math.isfinite(left)
+                        and math.isfinite(right)
+                    ):
+                        self._moc3_stage_canvas_height = canvas_height
+                        self._moc3_stage_content_half_width = max(abs(left), abs(right))
+                        self._moc3_stage_content_half_height = max(
+                            abs(float(content_bounds[3])), abs(float(content_bounds[4]))
+                        )
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        if not self._pixel_mode and (
+            self._moc3_stage_canvas_aspect is not None
+            or self._moc3_stage_content_half_width is not None
+        ):
+            self.setFixedSize(*self._live2d_size())
+            self._apply_moc3_stage_render_scale()
+
+    def _set_live2d_model_format(
+        self,
+        model_format: str,
+        model_identifier: str = "",
+        model_path: str = "",
+    ):
         model_format = str(model_format or "").lower()
-        if model_format == self._live2d_model_format:
+        model_identifier = str(model_identifier or "")
+        stage_model = (
+            model_format == MODEL_FORMAT_MOC3
+            and "stage" in f"{model_identifier} {model_path}".casefold()
+        )
+        if (
+            model_format == self._live2d_model_format
+            and model_identifier == self._live2d_model_identifier
+            and model_path == self._live2d_model_path
+        ):
             return
         self._live2d_model_format = model_format
+        self._live2d_model_identifier = model_identifier
+        self._live2d_model_path = model_path
+        self._moc3_stage_model = stage_model
+        self._moc3_stage_canvas_aspect = None
+        self._moc3_stage_canvas_height = None
+        self._moc3_stage_content_half_width = None
+        self._moc3_stage_content_half_height = None
+        self._apply_moc3_leg_crop_to_widget()
         if not self._pixel_mode:
             self.setFixedSize(*self._live2d_size())
 
@@ -3225,6 +3427,7 @@ class PetWindow(QWidget):
         self._live2d_scale = clamp_live2d_scale(value)
         if not self._pixel_mode:
             self.setFixedSize(*self._live2d_size())
+        self._apply_moc3_stage_render_scale()
         self._sync_compact_ai_window()
 
     def set_moc3_leg_crop(self, enabled: object, visible_height: object):
@@ -3237,17 +3440,14 @@ class PetWindow(QWidget):
             self._moc3_crop_runtime_disabled = False
         self._moc3_leg_crop_enabled = enabled
         self._moc3_visible_height = visible_height
-        if hasattr(self, "_live2d_widget"):
-            self._live2d_widget.set_moc3_leg_crop(
-                self._moc3_leg_crop_enabled and not self._moc3_crop_runtime_disabled,
-                self._moc3_visible_height,
-            )
+        self._apply_moc3_leg_crop_to_widget()
         if not self._pixel_mode:
             self.setFixedSize(*self._live2d_size())
+        self._apply_moc3_stage_render_scale()
         self._sync_compact_ai_window()
 
     def _on_moc3_crop_render_failed(self):
-        if not self._moc3_leg_crop_enabled or self._moc3_crop_runtime_disabled:
+        if not self._moc3_crop_active():
             return
         self._moc3_crop_runtime_disabled = True
         print(
@@ -3255,9 +3455,10 @@ class PetWindow(QWidget):
             file=sys.stderr,
             flush=True,
         )
-        self._live2d_widget.set_moc3_leg_crop(False, self._moc3_visible_height)
+        self._apply_moc3_leg_crop_to_widget()
         if not self._pixel_mode:
             self.setFixedSize(*self._live2d_size())
+        self._apply_moc3_stage_render_scale()
 
     def reset_position(self):
         screen = QGuiApplication.primaryScreen() or self._fallback_position_screen()
