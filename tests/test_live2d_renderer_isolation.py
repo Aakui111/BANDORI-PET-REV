@@ -4,9 +4,16 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from lupa.luajit21 import LuaRuntime
+
 from live2d_lua_adapter_base import LuaLAppModelBase, LuaLive2DRuntimeBase
 from live2d_lua_adapter_moc import LuaLAppModelMOC, LuaLive2DModuleMOC
-from live2d_lua_adapter_moc3 import LuaLive2DModuleMOC3, _patch_lua_moc3_pet_embed_delta
+from live2d_lua_adapter_moc3 import (
+    LuaLAppModelMOC3,
+    LuaLive2DModuleMOC3,
+    _patch_lua_moc3_pet_embed_delta,
+)
+from live2d_lua_moc3_source_patch import patch_live2d_lua_moc3_module
 from live2d_lua_source_patch import patch_live2d_lua_module
 from live2d_widget import Live2DWidget, render_pipeline_for_model
 from live2d_widget_base import DIRECT_RENDER_PIPELINE
@@ -150,6 +157,49 @@ def test_moc3_ssaa_fallback_renders_without_advancing_model(monkeypatch):
     assert calls == ["render"]
 
 
+def test_moc3_framebuffer_blit_crops_from_the_top_of_the_virtual_canvas(monkeypatch):
+    calls = []
+
+    class FakeGL:
+        GL_READ_FRAMEBUFFER = 1
+        GL_DRAW_FRAMEBUFFER = 2
+        GL_FRAMEBUFFER = 3
+        GL_COLOR_BUFFER_BIT = 4
+        GL_STENCIL_BUFFER_BIT = 8
+        GL_LINEAR = 5
+
+        def glBindFramebuffer(self, *args):
+            calls.append(("bind", *args))
+
+        def glViewport(self, *args):
+            calls.append(("viewport", *args))
+
+        def glClearColor(self, *args):
+            calls.append(("clear_color", *args))
+
+        def glClear(self, *args):
+            calls.append(("clear", *args))
+
+        def glBlitFramebuffer(self, *args):
+            calls.append(("blit", *args))
+
+    monkeypatch.setattr(live2d_widget_moc3, "gl", FakeGL())
+    framebuffer = live2d_widget_moc3.Live2DSSAAFramebuffer()
+    framebuffer._fbo = SimpleNamespace(handle=lambda: 11)
+    framebuffer._size = (800, 1600)
+
+    assert framebuffer.blit_to_default(
+        default_fbo=7,
+        width=400,
+        height=500,
+        clear_color=(0.0, 0.0, 0.0, 0.0),
+        source_crop_height=1000,
+    )
+
+    blit = next(call[1:] for call in calls if call[0] == "blit")
+    assert blit == (0, 600, 800, 1600, 0, 0, 400, 500, 4, 5)
+
+
 def test_moc3_render_target_size_changes_only_when_needed():
     calls = []
     model = SimpleNamespace(ResizeRenderer=lambda width, height: calls.append((width, height)))
@@ -263,3 +313,44 @@ def test_moc3_runtime_patch_separates_logical_and_render_target_sizes():
     assert b"/ math.max(self.width, 1)" in patched
     assert b"/ math.max(self.height, 1)" in patched
     assert _patch_lua_moc3_pet_embed_delta("live2d_moc3_pet_embed", patched) == patched
+
+
+def test_moc3_packaging_patch_is_idempotent_and_covers_runtime_sources():
+    root = Path(__file__).resolve().parents[1] / "third_party" / "Live2D-v2-Lua"
+    pet_source = (root / "live2d_moc3_pet_embed.lua").read_bytes()
+    patched_pet = patch_live2d_lua_moc3_module("live2d_moc3_pet_embed", pet_source)
+
+    assert b"function Renderer:resize_renderer" in patched_pet
+    assert patch_live2d_lua_moc3_module("live2d_moc3_pet_embed", patched_pet) == patched_pet
+
+    physics_source = (root / "live2d" / "cubism3" / "physics.lua").read_bytes()
+    patched_physics = patch_live2d_lua_moc3_module(
+        "live2d.cubism3.physics",
+        physics_source,
+    )
+    assert b"self.last_substep_count = 0" in patched_physics
+    assert patch_live2d_lua_moc3_module(
+        "live2d.cubism3.physics",
+        patched_physics,
+    ) == patched_physics
+
+
+def test_moc3_model_exposes_canvas_size_to_window_sizing():
+    module = LuaLive2DModuleMOC3()
+    module._lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+    module._get_canvas_size = module._lua.eval(
+        b"function(renderer) "
+        b"local canvas = renderer:get_runtime().canvas; "
+        b"return canvas.width, canvas.height "
+        b"end"
+    )
+    renderer = module._lua.execute(
+        b"local renderer = {runtime = {canvas = {width = 12000, height = 9000}}}; "
+        b"function renderer:get_runtime() return self.runtime end; "
+        b"return renderer"
+    )
+    model = LuaLAppModelMOC3(module)
+    model._renderer = renderer
+
+    assert model.GetCanvasSize() == (12000.0, 9000.0)
+    module.dispose()

@@ -22,6 +22,23 @@ def _asset(name: str) -> dict:
 
 
 class AppUpdateTests(unittest.TestCase):
+    def test_windows_release_packages_select_the_native_architecture(self):
+        for channel, suffix64, suffixarm in (
+            ("portable", "win64.zip", "winarm64.zip"),
+            ("msi", "win64.msi", "winarm64.msi"),
+            ("inno", "winamd64-setup.exe", "winarm64-setup.exe"),
+        ):
+            x64 = _asset(f"BandoriPet-3.2.1-{suffix64}")
+            arm = _asset(f"BandoriPet-3.2.1-{suffixarm}")
+            for machine, matching, other in (("AMD64", x64, arm), ("ARM64", arm, x64)):
+                with (
+                    self.subTest(channel=channel, machine=machine),
+                    patch.object(app_update.sys, "platform", "win32"),
+                    patch.object(app_update.platform, "machine", return_value=machine),
+                ):
+                    self.assertEqual(matching, app_update._select_release_asset([other, matching], channel))
+                    self.assertIsNone(app_update._select_release_asset([other], channel))
+
     def test_updater_stops_every_packaged_gui_process(self):
         self.assertIn("radial_menu_process", app_update._PROCESS_NAMES)
         self.assertIn("settings_process", app_update._PROCESS_NAMES)

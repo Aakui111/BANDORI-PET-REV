@@ -67,6 +67,9 @@ class _PaintHarness:
     def _apply_lip_sync(self):
         pass
 
+    def _sample_input_region(self, _width, _height):
+        pass
+
 
 def _paint(harness):
     Live2DWidgetBase.paintGL(harness)
@@ -124,6 +127,48 @@ def test_first_successful_draw_compacts_transient_lua_texture_memory(monkeypatch
 
     assert compact_calls == [True]
     assert harness._compact_memory_after_frame is False
+
+
+def test_moc3_crop_falls_back_when_framebuffer_creation_fails(monkeypatch):
+    monkeypatch.setattr(live2d_widget_base, "gl", _FakeGL())
+    harness = _PaintHarness([None])
+    fallback_calls = []
+
+    def fail_to_create_framebuffer():
+        raise RuntimeError("framebuffer unavailable")
+
+    harness._moc3_leg_crop_enabled = True
+    harness._moc3_visible_height = 500
+    harness._render_pipeline = SimpleNamespace(
+        supports_leg_crop=True,
+        create_framebuffer=fail_to_create_framebuffer,
+    )
+    harness._render_ssaa_scale = lambda: 2
+    harness._request_moc3_crop_fallback = lambda: fallback_calls.append(True)
+
+    _paint(harness)
+
+    assert fallback_calls == [True]
+    assert harness._model.draw_calls == 0
+
+
+def test_moc3_crop_uses_full_canvas_viewport_without_ssaa(monkeypatch):
+    viewports = []
+
+    class ViewportGL(_FakeGL):
+        def glViewport(self, *args):
+            viewports.append(args)
+
+    monkeypatch.setattr(live2d_widget_base, "gl", ViewportGL())
+    harness = _PaintHarness([None])
+    harness._moc3_leg_crop_enabled = True
+    harness._moc3_visible_height = 500
+    harness._render_pipeline = SimpleNamespace(supports_leg_crop=True)
+
+    _paint(harness)
+
+    assert viewports[-1] == (0, -60, 100, 160)
+    assert harness._model.draw_calls == 1
 
 
 def test_render_failure_state_can_be_reset_after_suspension():

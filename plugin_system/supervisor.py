@@ -290,11 +290,17 @@ class PluginSupervisor(QObject):
             try:
                 peer.call("plugin.shutdown", {"reason": reason}, timeout_ms=1500)
             except Exception:
-                pass
+                # Unblock any nested worker RPC before waiting for it to exit.
+                peer.socket.abort()
         if process is not None and process.state() != QProcess.ProcessState.NotRunning:
-            process.terminate()
+            # Let the shutdown RPC finish exiting the worker before forcing it
+            # down; Windows virtualenv launchers can otherwise leave a child
+            # interpreter holding the plugin directory open.
             if not process.waitForFinished(1000):
-                process.kill()
+                process.terminate()
+                if not process.waitForFinished(1000):
+                    process.kill()
+                    process.waitForFinished(1000)
         self._cleanup_plugin(plugin_id)
 
     def reload_plugin(self, plugin_id: str) -> None:

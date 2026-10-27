@@ -588,7 +588,7 @@ def _asset_arch(name: str) -> str:
     lower = name.lower()
     normalized = re.sub(r"[^a-z0-9]+", "-", lower).strip("-")
     tokens = set(normalized.split("-"))
-    if {"arm64", "aarch64"} & tokens:
+    if {"arm64", "aarch64", "winarm64"} & tokens:
         return "arm64"
     if (
         {"amd64", "x64", "win64", "winamd64"} & tokens

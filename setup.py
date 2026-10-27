@@ -19,6 +19,8 @@ from cx_Freeze.command.bdist_mac import bdist_mac
 from cx_Freeze.command.bdist_msi import bdist_msi
 from cx_Freeze.command.build_exe import build_exe
 
+from live2d_lua_moc3_source_patch import patch_live2d_lua_moc3_module
+
 
 BASE_DIR = Path(__file__).resolve().parent
 BYTECODE_BUILD_DIR = BASE_DIR / "BUILD" / ".luajit-bytecode"
@@ -66,6 +68,18 @@ class BuildExeWithEmptyModels(build_exe):
         if BYTECODE_BUILD_DIR.exists():
             shutil.rmtree(BYTECODE_BUILD_DIR)
         build_dir = Path(self.build_exe)
+        pyside_source = Path(importlib.import_module("PySide6").__file__).resolve().parent
+        pyside_icu_names = {
+            path.name.casefold()
+            for path in pyside_source.rglob("icu*.dll")
+        }
+        bundled_pyside_dir = build_dir / "lib" / "PySide6"
+        if bundled_pyside_dir.is_dir():
+            for path in bundled_pyside_dir.glob("icu*.dll"):
+                if path.name.casefold() not in pyside_icu_names:
+                    # cx_Freeze can resolve ICU from unrelated packages on PATH
+                    # (such as Poppler), which is incompatible with Qt6Core.
+                    path.unlink()
         for filename in USER_DATA_FILENAMES:
             path = build_dir / filename
             if path.exists():
@@ -88,8 +102,10 @@ class BuildExeWithEmptyModels(build_exe):
 def _force_msi_database_codepage(db, installer_name: str, codepage: int) -> None:
     import ctypes
     import tempfile
-    import _msi
     from ctypes import wintypes
+
+    # Python 3.13+ uses python-msilib, including native Windows ARM64 builds.
+    _msi = _windows_msi_module()
 
     if codepage <= 0:
         raise ValueError(f"MSI codepage must be a positive integer: {codepage}")
@@ -167,6 +183,12 @@ def _windows_installer_codepage() -> int:
         ) from exc
 
 
+def _windows_msi_module():
+    if sys.version_info >= (3, 13):
+        return importlib.import_module("msilib._msi")
+    return importlib.import_module("_msi")
+
+
 def _init_msi_database_with_codepage(original_init_database):
     def init_database_with_codepage(installer_name, *args, **kwargs):
         db = original_init_database(installer_name, *args, **kwargs)
@@ -177,7 +199,7 @@ def _init_msi_database_with_codepage(original_init_database):
             codepage,
         )
 
-        import _msi
+        _msi = _windows_msi_module()
 
         db = _msi.OpenDatabase(installer_name, _msi.MSIDBOPEN_TRANSACT)
         summary_info = db.GetSummaryInformation(20)
@@ -340,6 +362,7 @@ class BuildInnoAlias(Command):
             "{LICENSE_FILE}": str(license_file) if license_file.exists() else "",
             "{ICON_FILE}": str(icon_file) if icon_file.exists() else "",
             "{LANGUAGE_ENTRIES}": _inno_language_entries(iscc),
+            "{INSTALL_ARCH}": "arm64" if release_arch_name() == "ARM64" else "x64compatible",
         }
 
         iss_content = template
@@ -415,6 +438,7 @@ def _compiled_lua_include(path: str, dest_path: str | None = None) -> tuple[str,
         module_name = ".".join(module_parts)
         source = src.read_bytes()
         patched = patch_live2d_lua_module(module_name, source)
+        patched = patch_live2d_lua_moc3_module(module_name, patched)
         if patched != source:
             compile_src = BYTECODE_BUILD_DIR / ".patched-source" / src.relative_to(BASE_DIR)
             compile_src.parent.mkdir(parents=True, exist_ok=True)
@@ -604,7 +628,7 @@ build_msi_options = {
     "product_version": APP_VERSION,
     "upgrade_code": "{A8D4D0D2-3D5F-4F1E-9B26-1BDCBFC6D4A1}",
     "install_icon": icon,
-    "initial_target_dir": r"[ProgramFilesFolder]\BandoriPet",
+    "initial_target_dir": r"[ProgramFiles64Folder]\BandoriPet",
     "summary_data": {
         "author": "BandoriPet",
         "comments": "Bandori desktop pet",
@@ -643,6 +667,7 @@ setup(
     version=APP_VERSION,
     description="Bandori desktop pet",
     options={
+        "build": {"build_base": str(BASE_DIR / "BUILD")},
         "build_exe": build_exe_options,
         "build_msi": build_msi_options,
         "bdist_msi": build_msi_options,

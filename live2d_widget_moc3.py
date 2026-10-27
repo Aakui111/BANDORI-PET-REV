@@ -1,9 +1,10 @@
 import sys
 from PySide6.QtOpenGL import QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat
+from live2d_quality import LIVE2D_MOC3_RENDER_SCALE
 from qt_gl import gl
 
 
-DEFAULT_MOC3_RENDER_SCALE = 1
+DEFAULT_MOC3_RENDER_SCALE = LIVE2D_MOC3_RENDER_SCALE
 MOC3_BALANCED_SSAA_SCALE = 2
 
 
@@ -33,12 +34,23 @@ class Live2DSSAAFramebuffer:
         if self._fbo is not None:
             self._fbo.release()
 
-    def blit_to_default(self, default_fbo: int, width: int, height: int, clear_color) -> bool:
+    def blit_to_default(
+        self,
+        default_fbo: int,
+        width: int,
+        height: int,
+        clear_color,
+        source_crop_height: int | None = None,
+    ) -> bool:
         if self._fbo is None:
             return False
         width = max(int(width), 1)
         height = max(int(height), 1)
         source_w, source_h = self._size
+        source_y0 = 0
+        if source_crop_height is not None:
+            crop_height = max(1, min(source_h, int(source_crop_height)))
+            source_y0 = source_h - crop_height
         try:
             gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, int(self._fbo.handle()))
             gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, default_fbo)
@@ -47,7 +59,7 @@ class Live2DSSAAFramebuffer:
             gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_STENCIL_BUFFER_BIT)
             gl.glBlitFramebuffer(
                 0,
-                0,
+                source_y0,
                 source_w,
                 source_h,
                 0,
@@ -78,6 +90,8 @@ class Live2DSSAAFramebuffer:
 
 
 class Moc3RenderPipeline:
+    supports_leg_crop = True
+
     def prepare_model(self, model):
         model.SetScale(DEFAULT_MOC3_RENDER_SCALE)
 

@@ -34,6 +34,7 @@ from outfit_description_config import (
 )
 from i18n_manager import set_language, detect_system_language, tr as _tr
 from app_theme import apply_app_theme
+from live2d_quality import clamp_moc3_visible_height
 from onebot_message import onebot_event_mentions_self
 from tray_utils import keep_tray_icon_visible, load_tray_icon
 from gpu_acceleration import configure_qt_gpu_acceleration
@@ -1294,6 +1295,8 @@ def main():
             # 0 is the canonical "auto" sentinel (clamp_live2d_scale resolves it);
             # source it from DEFAULTS so this path never drifts from config_manager.
             ("live2d_scale", "live2d_scale", DEFAULTS["live2d_scale"]),
+            ("moc3_leg_crop_enabled", "moc3_leg_crop_enabled", DEFAULTS["moc3_leg_crop_enabled"]),
+            ("moc3_visible_height", "moc3_visible_height", DEFAULTS["moc3_visible_height"]),
             ("compact_ai_window_enabled", "compact_ai_window_enabled", False),
             ("compact_ai_window_opacity", "compact_ai_window_opacity", 44),
             ("compact_ai_window_font_size", "compact_ai_window_font_size", 12),
@@ -1392,6 +1395,10 @@ def main():
             value = data.get(cfg_key, pet_window_ref.get(ref_key, cfg.get(cfg_key, default)))
             if cfg_key in ("ai_status_port", "chat_integration_port"):
                 value = clamp_int(value, 1024, 65535, default)
+            elif cfg_key == "moc3_leg_crop_enabled":
+                value = bool(value)
+            elif cfg_key == "moc3_visible_height":
+                value = clamp_moc3_visible_height(value, default)
             pet_window_ref[ref_key] = value
         if language:
             cfg.set("language", language)
@@ -1469,6 +1476,7 @@ def main():
             "live2d_mutual_gaze_enabled", "move_all_roles_together",
             "birthday_tray_notifications_enabled",
             "live2d_quality", "live2d_scale",
+            "moc3_leg_crop_enabled", "moc3_visible_height",
             "compact_ai_window_enabled", "compact_ai_window_opacity",
             "compact_ai_window_font_size", "compact_ai_window_background_color",
             "compact_ai_window_text_color", "ai_event_overlay_enabled",
