@@ -1,0 +1,273 @@
+name: Build installers
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installers-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+
+jobs:
+  prepare:
+    name: Validate release version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Read APP_VERSION and check the Release tag
+        id: version
+        run: |
+          version="$(python installer/package_release.py version)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.target }} / ${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: windows, arch: x86_64, os: windows-2022, python-arch: x64, msvc-arch: amd64 }
+          - { target: windows, arch: aarch64, os: windows-11-arm, python-arch: arm64, msvc-arch: arm64 }
+          - { target: linux, arch: x86_64, os: ubuntu-24.04, python-arch: x64 }
+          - { target: linux, arch: aarch64, os: ubuntu-24.04-arm, python-arch: arm64 }
+          - { target: macos, arch: x86_64, os: macos-15-intel, python-arch: x64, mac-arch: x86_64 }
+          - { target: macos, arch: aarch64, os: macos-14, python-arch: arm64, mac-arch: arm64 }
+    env:
+      PIP_CONSTRAINT: ${{ github.workspace }}/installer/build-constraints.txt
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      # Keep these revisions in sync with ci.yml when updating runtime sources.
+      - name: Check out Live2D runtime
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: EasyLive2D/Live2D-v2-Lua
+          ref: c46c254c14cffda57bb4eefe0fdca4ae3cc73206
+          path: third_party/Live2D-v2-Lua
+          persist-credentials: false
+      - name: Check out PySide6 Fluent Widgets
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: zhiyiYo/PyQt-Fluent-Widgets
+          ref: d90c008c534b2b0079ce7981d19b2bc957b354a5
+          path: third_party/PyQt-Fluent-Widgets
+          persist-credentials: false
+      - name: Check out LuaJIT 2.1 compiler
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: LuaJIT/LuaJIT
+          ref: a4c064539ea931274d407e1249b4bb575424a0f4
+          path: third_party/LuaJIT
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          architecture: ${{ matrix.python-arch }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            installer/build-constraints.txt
+            third_party/PyQt-Fluent-Widgets/requirements.txt
+      - name: Verify native Python architecture
+        shell: python
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          import os, platform
+          actual = platform.machine().lower()
+          actual = {"amd64": "x86_64", "arm64": "aarch64"}.get(actual, actual)
+          assert actual == os.environ["TARGET_ARCH"], actual
+      - name: Install Linux build, GUI and audio libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential rpm desktop-file-utils patchelf \
+            libegl1 libgl1 libopengl0 libportaudio2 libsndfile1 \
+            libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 libdbus-1-3 \
+            libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0
+      - name: Build native LuaJIT compiler (Linux and macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          make -C third_party/LuaJIT -j2
+          make -C third_party/LuaJIT install PREFIX="$RUNNER_TEMP/luajit"
+          echo "$RUNNER_TEMP/luajit/bin" >> "$GITHUB_PATH"
+      - name: Build native LuaJIT compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MSVC_ARCH: ${{ matrix.msvc-arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstall = & $vswhere -latest -products '*' -property installationPath
+          if (-not $vsInstall) { throw 'Visual Studio C++ tools were not found' }
+          $devcmd = Join-Path $vsInstall 'Common7\Tools\VsDevCmd.bat'
+          $buildEnv = & cmd /d /c "`"$devcmd`" -no_logo -arch=$env:MSVC_ARCH -host_arch=amd64 >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not initialize MSVC' }
+          foreach ($entry in $buildEnv) {
+            if ($entry -match '^([^=]+)=(.*)$') {
+              [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+            }
+          }
+          Push-Location third_party/LuaJIT/src
+          try {
+            & cmd /d /c msvcbuild.bat
+            if ($LASTEXITCODE -ne 0) { throw 'LuaJIT compilation failed' }
+          } finally { Pop-Location }
+          $luaSource = (Resolve-Path third_party/LuaJIT/src).Path
+          $luaSource | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "LUA_PATH=$luaSource\?.lua;;" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install Python build and runtime dependencies
+        if: runner.os != 'macOS'
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -r requirements.txt cx-Freeze
+          python -m pip install --no-deps -e third_party/PyQt-Fluent-Widgets
+          python -m pip check
+      - name: Verify embedded LuaJIT 2.1 and FFI
+        if: runner.os != 'macOS'
+        shell: python
+        run: |
+          from lupa.luajit21 import LuaRuntime
+          lua = LuaRuntime()
+          lua.execute('assert(require("ffi"))')
+          print(lua.eval('jit.version'))
+      - name: Install Windows MSI support
+        if: runner.os == 'Windows'
+        run: python -m pip install python-msilib
+      - name: Install Inno Setup 6
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $installer
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne '9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732') {
+            throw 'Inno Setup 6 checksum mismatch'
+          }
+          $innoDir = Join-Path $env:RUNNER_TEMP 'InnoSetup6'
+          $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$innoDir`"") -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed: $($process.ExitCode)" }
+          $compiler = Join-Path $innoDir 'ISCC.exe'
+          if (-not (Test-Path $compiler)) { throw 'Inno Setup 6 compiler was not installed' }
+          "ISCC_PATH=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build Windows MSI, Inno Setup EXE and portable ZIP
+        if: runner.os == 'Windows'
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          python setup.py build_msi build_inno
+          python installer/package_release.py windows --target windows --arch $env:TARGET_ARCH
+      - name: Build Linux AppImage, DEB, RPM and tarball
+        if: runner.os == 'Linux'
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: bash installer/linux/build_packages.sh "$TARGET_ARCH"
+      - name: Build macOS DMG and ZIP
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MAC_ARCH: ${{ matrix.mac-arch }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          export BANDORIPET_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          bash installer/macos/build_dmg.sh "$MAC_ARCH"
+          build_arch=AMD64
+          if [[ "$TARGET_ARCH" == aarch64 ]]; then build_arch=ARM64; fi
+          "BUILD/venv-$MAC_ARCH/bin/python" installer/package_release.py validate-build \
+            --target macos --arch "$TARGET_ARCH" \
+            --directory "BUILD/BANDORI-PET-REV-RELEASE-MACOS-$build_arch"
+          version="$(python installer/package_release.py version)"
+          mkdir -p BUILD/release
+          cp "BUILD/BandoriPet-$version-macos-$MAC_ARCH.dmg" BUILD/release/
+          stage="$(mktemp -d)"
+          trap 'rm -rf "$stage"' EXIT
+          cp -R BUILD/BandoriPet.app "$stage/"
+          cp installer/macos/首次打开修复.command installer/macos/首次运行必读.txt "$stage/"
+          chmod +x "$stage/首次打开修复.command"
+          ditto -c -k --sequesterRsrc "$stage" "BUILD/release/BandoriPet-$version-macos-$MAC_ARCH.zip"
+          python installer/package_release.py checksums --target macos --arch "$TARGET_ARCH"
+      - name: Upload installers for this platform
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: BandoriPet-${{ needs.prepare.outputs.version }}-${{ matrix.target }}-${{ matrix.arch }}
+          path: BUILD/release/*
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 30
+
+  collect:
+    name: All installers (Actions download)
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          pattern: BandoriPet-${{ needs.prepare.outputs.version }}-*
+          path: BUILD/release
+          merge-multiple: true
+      - name: Verify all 18 installers and generate SHA256SUMS
+        run: python installer/package_release.py collect
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: all-installers-${{ needs.prepare.outputs.version }}
+          path: BUILD/release/*
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 30
+      - name: Add download instructions to the run summary
+        run: |
+          echo '### Installers ready' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Download **all-installers-${{ needs.prepare.outputs.version }}** from the Artifacts section of this run for all 18 installers and SHA-256 checksums.' >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Attach installers to GitHub Release
+    if: github.event_name == 'release'
+    needs: [prepare, collect]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: all-installers-${{ needs.prepare.outputs.version }}
+          path: installers
+      - name: Upload assets to the triggering Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$RELEASE_TAG" installers/* --clobber

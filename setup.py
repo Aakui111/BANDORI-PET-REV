@@ -102,8 +102,10 @@ class BuildExeWithEmptyModels(build_exe):
 def _force_msi_database_codepage(db, installer_name: str, codepage: int) -> None:
     import ctypes
     import tempfile
-    import _msi
     from ctypes import wintypes
+
+    # Python 3.13+ uses python-msilib, including native Windows ARM64 builds.
+    _msi = _windows_msi_module()
 
     if codepage <= 0:
         raise ValueError(f"MSI codepage must be a positive integer: {codepage}")
@@ -181,6 +183,12 @@ def _windows_installer_codepage() -> int:
         ) from exc
 
 
+def _windows_msi_module():
+    if sys.version_info >= (3, 13):
+        return importlib.import_module("msilib._msi")
+    return importlib.import_module("_msi")
+
+
 def _init_msi_database_with_codepage(original_init_database):
     def init_database_with_codepage(installer_name, *args, **kwargs):
         db = original_init_database(installer_name, *args, **kwargs)
@@ -191,7 +199,7 @@ def _init_msi_database_with_codepage(original_init_database):
             codepage,
         )
 
-        import _msi
+        _msi = _windows_msi_module()
 
         db = _msi.OpenDatabase(installer_name, _msi.MSIDBOPEN_TRANSACT)
         summary_info = db.GetSummaryInformation(20)
@@ -354,6 +362,7 @@ class BuildInnoAlias(Command):
             "{LICENSE_FILE}": str(license_file) if license_file.exists() else "",
             "{ICON_FILE}": str(icon_file) if icon_file.exists() else "",
             "{LANGUAGE_ENTRIES}": _inno_language_entries(iscc),
+            "{INSTALL_ARCH}": "arm64" if release_arch_name() == "ARM64" else "x64compatible",
         }
 
         iss_content = template
@@ -619,7 +628,7 @@ build_msi_options = {
     "product_version": APP_VERSION,
     "upgrade_code": "{A8D4D0D2-3D5F-4F1E-9B26-1BDCBFC6D4A1}",
     "install_icon": icon,
-    "initial_target_dir": r"[ProgramFilesFolder]\BandoriPet",
+    "initial_target_dir": r"[ProgramFiles64Folder]\BandoriPet",
     "summary_data": {
         "author": "BandoriPet",
         "comments": "Bandori desktop pet",
@@ -658,6 +667,7 @@ setup(
     version=APP_VERSION,
     description="Bandori desktop pet",
     options={
+        "build": {"build_base": str(BASE_DIR / "BUILD")},
         "build_exe": build_exe_options,
         "build_msi": build_msi_options,
         "bdist_msi": build_msi_options,

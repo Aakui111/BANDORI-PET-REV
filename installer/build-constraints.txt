@@ -1,0 +1,5 @@
+# Shared by the release workflow and the venv created by build_dmg.sh.
+cx-Freeze==8.7.3
+PySide6==6.10.2
+lupa==2.8
+python-msilib==0.7.3; sys_platform == "win32" and python_version >= "3.13"

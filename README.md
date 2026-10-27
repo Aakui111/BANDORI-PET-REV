@@ -276,6 +276,39 @@ python setup.py build
 python setup.py build_msi
 ```
 
+### 自动构建安装包
+
+[Build installers 工作流](.github/workflows/release.yml) 支持两种触发方式：
+
+- 发布 GitHub Release（包括预发布版）后自动构建，全部成功后将安装包上传到该 Release。
+- 在 **Actions → Build installers → Run workflow** 中选择分支或标签手动构建；
+  完成后在该次运行底部 **Artifacts** 下载 `all-installers-<版本号>`，一次获取全部
+  18 个安装包及 SHA-256 校验文件，也可按平台、架构分别下载。产物保留 30 天。
+
+所有版本号来自 `app_info.py` 的 `APP_VERSION`，必须为 `主版本.次版本.修订号`；
+Release 标签应为同一版本号或加 `v` 前缀（例如 `v3.2.1`）。手动构建使用所选
+分支或标签中的版本号，不会自动创建 Release。
+
+| 平台 | x86_64 文件名 | aarch64 文件名 |
+|---|---|---|
+| Windows 便携包 | `BandoriPet-<版本>-win64.zip` | `BandoriPet-<版本>-winarm64.zip` |
+| Windows MSI | `BandoriPet-<版本>-win64.msi` | `BandoriPet-<版本>-winarm64.msi` |
+| Windows Inno Setup 6 | `BandoriPet-<版本>-winamd64-setup.exe` | `BandoriPet-<版本>-winarm64-setup.exe` |
+| Linux | `BandoriPet-<版本>-linux-x86_64.{AppImage,deb,rpm,tar.gz}` | `BandoriPet-<版本>-linux-aarch64.{AppImage,deb,rpm,tar.gz}` |
+| macOS | `BandoriPet-<版本>-macos-x86_64.{dmg,zip}` | `BandoriPet-<版本>-macos-arm64.{dmg,zip}` |
+
+六个目标分别在对应架构的 GitHub 托管 Runner 上原生构建，使用 Python 3.13。
+构建工具、Qt 和 LuaJIT Python 绑定版本固定在
+[`installer/build-constraints.txt`](installer/build-constraints.txt)，第三方源码版本
+固定在工作流中；Windows 显式安装 Inno Setup 6.7.3。
+
+Linux 包基于 Ubuntu 24.04 构建，需要 glibc 2.39+ 和 OpenGL/音频系统库；
+DEB、RPM 会声明依赖，AppImage、tarball 用户需自行安装相应系统库。
+从 Actions 下载 AppImage 后，先执行 `chmod +x BandoriPet-*.AppImage` 再运行。
+Linux 原生 Wayland 桥及桌面伴侣仍需按 [Wayland 指南](docs/WAYLAND_NATIVE.md)
+从源码安装。macOS 复用现有 ad-hoc 签名及首次打开辅助文件。
+所有安装包均不含模型和用户数据，模型需另行下载。
+
 ### 持续集成与本地检查
 
 [CI 工作流](.github/workflows/ci.yml) 在每次 push、Pull Request 及手动触发时运行：
