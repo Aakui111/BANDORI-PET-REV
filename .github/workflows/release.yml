@@ -177,6 +177,7 @@ jobs:
           "ISCC_PATH=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build Windows MSI, Inno Setup EXE and portable ZIP
         if: runner.os == 'Windows'
+        shell: pwsh
         env:
           TARGET_ARCH: ${{ matrix.arch }}
         run: |
@@ -194,7 +195,8 @@ jobs:
           MAC_ARCH: ${{ matrix.mac-arch }}
           TARGET_ARCH: ${{ matrix.arch }}
         run: |
-          export BANDORIPET_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          BANDORIPET_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          export BANDORIPET_PYTHON
           bash installer/macos/build_dmg.sh "$MAC_ARCH"
           build_arch=AMD64
           if [[ "$TARGET_ARCH" == aarch64 ]]; then build_arch=ARM64; fi

@@ -158,6 +158,8 @@ class _ApplyHarness(QWidget):
         self._birthday_tray_notifications_enabled = True
         self._live2d_quality = "balanced"
         self._live2d_scale = 0
+        self._moc3_leg_crop_enabled = False
+        self._moc3_visible_height = 500
         self._configured_models = []
         self._game_topmost_switch = _SwitchStub(False)
         self._obs_window_capture_compatible_switch = _SwitchStub(False)

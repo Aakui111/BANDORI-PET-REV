@@ -38,6 +38,7 @@ class CompanionServer:
         self._error = ""
         self._zeroconf = None
         self._service_info = None
+        self._mdns_start_task = None
         controller.event_ready.connect(self.publish_event)
         controller.audio_ready.connect(self.publish_audio)
 
@@ -130,12 +131,20 @@ class CompanionServer:
         port = max(1024, min(65535, int(self.config.get("companion_port", 38474) or 38474)))
         site = web.TCPSite(self._runner, "0.0.0.0", port, ssl_context=ssl_context)
         await site.start()
-        self._start_mdns(port)
+        # Zeroconf's synchronous registration waits on its event loop. Creating
+        # it on this loop would block the WSS server while it waits for itself.
+        self._mdns_start_task = asyncio.create_task(asyncio.to_thread(self._start_mdns, port))
+        await self._mdns_start_task
         self._status = "running"
         self._error = ""
 
     async def _shutdown(self):
-        self._stop_mdns()
+        if self._mdns_start_task is not None:
+            # Finish registration before cleanup so a concurrent stop cannot
+            # leave an advertisement running after the WSS server has closed.
+            await asyncio.gather(self._mdns_start_task, return_exceptions=True)
+            self._mdns_start_task = None
+        await asyncio.to_thread(self._stop_mdns)
         for ws in list(self._clients.values()):
             try:
                 await ws.close(code=1001, message=b"server shutdown")

@@ -120,6 +120,12 @@ class NativeDragAnchorHarness:
 
 class ScaleHarness(QWidget):
     _live2d_size = PetWindow._live2d_size
+    _moc3_crop_active = PetWindow._moc3_crop_active
+    _apply_moc3_leg_crop_to_widget = PetWindow._apply_moc3_leg_crop_to_widget
+    _moc3_stage_reference_render_scale = PetWindow._moc3_stage_reference_render_scale
+    _moc3_stage_base_size = PetWindow._moc3_stage_base_size
+    _moc3_stage_render_scale = PetWindow._moc3_stage_render_scale
+    _apply_moc3_stage_render_scale = PetWindow._apply_moc3_stage_render_scale
     _set_live2d_model_format = PetWindow._set_live2d_model_format
     set_live2d_scale = PetWindow.set_live2d_scale
 

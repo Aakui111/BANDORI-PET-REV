@@ -1,6 +1,7 @@
 import asyncio
 import socket
 import sys
+import threading
 import time
 from concurrent.futures import Future
 from types import SimpleNamespace
@@ -141,6 +142,73 @@ def test_port_conflict_is_reported(tmp_path, monkeypatch):
             assert server.status["error"]
         finally:
             server.stop()
+
+
+def test_mdns_lifecycle_runs_outside_wss_event_loop(tmp_path, monkeypatch):
+    monkeypatch.setattr(companion_security, "app_data_dir", lambda: str(tmp_path))
+    port = _free_port()
+    server = CompanionServer(FakeController(), FakeConfig(port))
+    calls = []
+
+    def start_mdns(actual_port):
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        calls.append(("start", actual_port))
+
+    def stop_mdns():
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        calls.append(("stop",))
+
+    monkeypatch.setattr(server, "_start_mdns", start_mdns)
+    monkeypatch.setattr(server, "_stop_mdns", stop_mdns)
+
+    async def scenario():
+        try:
+            await server._start_async()
+            assert server.status["state"] == "running"
+        finally:
+            await server._shutdown()
+
+    asyncio.run(scenario())
+    assert calls == [("start", port), ("stop",)]
+    assert server.status["state"] == "stopped"
+
+
+def test_shutdown_waits_for_pending_mdns_registration(tmp_path, monkeypatch):
+    monkeypatch.setattr(companion_security, "app_data_dir", lambda: str(tmp_path))
+    server = CompanionServer(FakeController(), FakeConfig(_free_port()))
+    entered = threading.Event()
+    released = threading.Event()
+    calls = []
+
+    def start_mdns(_port):
+        entered.set()
+        assert released.wait(3)
+        calls.append("registered")
+
+    monkeypatch.setattr(server, "_start_mdns", start_mdns)
+    monkeypatch.setattr(server, "_stop_mdns", lambda: calls.append("unregistered"))
+
+    async def scenario():
+        startup = asyncio.create_task(server._start_async())
+        shutdown = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            shutdown = asyncio.create_task(server._shutdown())
+            done, _pending = await asyncio.wait([shutdown], timeout=0.05)
+            assert not done
+        finally:
+            released.set()
+            await startup
+            if shutdown is None:
+                await server._shutdown()
+            else:
+                await shutdown
+
+    asyncio.run(scenario())
+    assert calls == ["registered", "unregistered"]
+    assert server.status["state"] == "stopped"
 
 
 def test_pcm_stream_starts_once_and_keeps_monotonic_frame_order(monkeypatch):

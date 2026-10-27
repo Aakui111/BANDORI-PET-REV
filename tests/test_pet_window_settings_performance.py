@@ -246,7 +246,7 @@ def test_pixel_startup_does_not_load_live2d_model_first():
             get_model_json_path=lambda *_args: "anon.zst::live_01/model3.json",
             get_model_format=lambda *_args: "moc3",
         ),
-        _set_live2d_model_format=lambda value: calls.append(("format", value)),
+        _set_live2d_model_format=lambda value, **kwargs: calls.append(("format", value, kwargs)),
         _enable_pixel_mode=lambda save=False: calls.append(("pixel", save)) or True,
         _live2d_widget=SimpleNamespace(
             set_model_path=lambda path: calls.append(("live2d", path)),
@@ -256,6 +256,10 @@ def test_pixel_startup_does_not_load_live2d_model_first():
 
     PetWindow._load_initial_model(harness)
 
+    assert ("format", "moc3", {
+        "model_identifier": "live_01",
+        "model_path": "anon.zst::live_01/model3.json",
+    }) in calls
     assert ("live2d", "anon.zst::live_01/model3.json") not in calls
     assert ("pixel", False) in calls
 

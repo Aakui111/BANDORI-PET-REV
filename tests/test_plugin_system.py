@@ -7,11 +7,12 @@ import uuid
 import zipfile
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtCore import QEventLoop, QProcess, QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QLabel
 
@@ -733,6 +734,68 @@ return p
                 )
             finally:
                 supervisor.close()
+
+    def test_stop_plugin_disconnects_worker_when_shutdown_rpc_fails(self):
+        disconnected = []
+
+        def failed_shutdown(*_args, **_kwargs):
+            raise TimeoutError("worker is still waiting for a nested RPC")
+
+        peer = SimpleNamespace(
+            connected=True,
+            call=failed_shutdown,
+            socket=SimpleNamespace(abort=lambda: disconnected.append(True)),
+        )
+        supervisor = SimpleNamespace(
+            _cancel_startup_timer=lambda _plugin_id: None,
+            _plugin_peers={"com.example.test": peer},
+            _processes={},
+            _expected_stops=set(),
+            _cleanup_plugin=lambda _plugin_id: None,
+        )
+
+        PluginSupervisor.stop_plugin(supervisor, "com.example.test")
+
+        self.assertEqual([True], disconnected)
+
+    def test_stop_plugin_reaps_worker_before_cleanup(self):
+        class StubbornProcess:
+            exits_normally = False
+            terminated = False
+            killed = False
+            reaped = False
+
+            def state(self):
+                return QProcess.ProcessState.Running
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.killed = True
+
+            def waitForFinished(self, _timeout):
+                self.reaped = self.exits_normally or self.killed
+                return self.reaped
+
+        for exits_normally in (True, False):
+            with self.subTest(exits_normally=exits_normally):
+                process = StubbornProcess()
+                process.exits_normally = exits_normally
+                cleanup_states = []
+                supervisor = SimpleNamespace(
+                    _cancel_startup_timer=lambda _plugin_id: None,
+                    _plugin_peers={},
+                    _processes={"com.example.test": process},
+                    _expected_stops=set(),
+                    _cleanup_plugin=lambda _plugin_id: cleanup_states.append(process.reaped),
+                )
+
+                PluginSupervisor.stop_plugin(supervisor, "com.example.test")
+
+                self.assertEqual(not exits_normally, process.terminated)
+                self.assertEqual(not exits_normally, process.killed)
+                self.assertEqual([True], cleanup_states)
 
     def test_app_started_reaches_plugin_after_async_activation(self):
         with tempfile.TemporaryDirectory() as directory:
