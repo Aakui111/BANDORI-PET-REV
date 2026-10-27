@@ -276,6 +276,43 @@ python setup.py build
 python setup.py build_msi
 ```
 
+### 持续集成与本地检查
+
+[CI 工作流](.github/workflows/ci.yml) 在每次 push、Pull Request 及手动触发时运行：
+
+- Python 3.10–3.14：编译检查所有 Git 跟踪的 `.py` 文件，包含测试和安装脚本。
+- Ruff：检查语法、非法控制流和未定义名称等基础问题，规则见 `ruff.toml`。
+- LuaJIT 2.1：使用 `luajit -b` 编译所有 Git 跟踪的 `.lua` 文件，包含插件示例。
+- 校验所有 Git 跟踪的 JSON 资源、插件清单及 Bash、PowerShell、JavaScript
+  脚本语法，并用
+  [actionlint](https://github.com/rhysd/actionlint) 校验工作流。
+- Linux、Windows / Python 3.12：安装运行依赖，使用 Qt offscreen 模式运行完整
+  pytest 测试集，并保存 JUnit XML 报告 14 天。
+
+测试任务会自动检出固定版本的 Live2D 与 PySide6 Fluent Widgets 源码；更新
+这些第三方依赖时，请同步调整工作流内的 `ref`。语法检查只检查本仓库跟踪的
+文件，不会扫描本机虚拟环境、模型或第三方目录。
+
+按照上文准备第三方源码后，可在虚拟环境中运行：
+
+```bash
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m ruff check .
+```
+
+Linux / macOS：
+
+```bash
+QT_QPA_PLATFORM=offscreen python -m pytest tests -q
+```
+
+Windows PowerShell：
+
+```powershell
+$env:QT_QPA_PLATFORM = "offscreen"
+python -m pytest tests -q
+```
+
 ### 自动更新发布约定
 
 设置页的「关于」中带有检查更新入口。不同运行方式会自动走对应的更新路径：
